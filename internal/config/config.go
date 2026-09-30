@@ -12,6 +12,8 @@ type Config struct {
 	DataDir       string
 
 	YCAPIKey      string
+	YCFolderID    string
+	YCGPTModel    string
 	YCBucket      string
 	YCS3AccessKey string
 	YCS3SecretKey string
@@ -24,6 +26,8 @@ func Load() (*Config, error) {
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		DataDir:       os.Getenv("DATA_DIR"),
 		YCAPIKey:      os.Getenv("YC_API_KEY"),
+		YCFolderID:    os.Getenv("YC_FOLDER_ID"),
+		YCGPTModel:    os.Getenv("YC_GPT_MODEL"),
 		YCBucket:      os.Getenv("YC_BUCKET"),
 		YCS3AccessKey: os.Getenv("YC_S3_ACCESS_KEY_ID"),
 		YCS3SecretKey: os.Getenv("YC_S3_SECRET_ACCESS_KEY"),
@@ -32,6 +36,7 @@ func Load() (*Config, error) {
 	}
 	for name, v := range map[string]string{
 		"YC_API_KEY":              c.YCAPIKey,
+		"YC_FOLDER_ID":            c.YCFolderID,
 		"YC_BUCKET":               c.YCBucket,
 		"YC_S3_ACCESS_KEY_ID":     c.YCS3AccessKey,
 		"YC_S3_SECRET_ACCESS_KEY": c.YCS3SecretKey,
@@ -39,6 +44,9 @@ func Load() (*Config, error) {
 		if v == "" {
 			return nil, errors.New(name + " is required")
 		}
+	}
+	if c.YCGPTModel == "" {
+		c.YCGPTModel = "yandexgpt/latest" // YandexGPT Pro
 	}
 	if c.YCS3Endpoint == "" {
 		c.YCS3Endpoint = "https://storage.yandexcloud.net"

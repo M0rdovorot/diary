@@ -13,6 +13,7 @@ import (
 	"diary/internal/config"
 	"diary/internal/handler"
 	"diary/internal/stt"
+	"diary/internal/summary"
 )
 
 func main() {
@@ -45,6 +46,7 @@ func main() {
 		DataDir:       cfg.DataDir,
 		Storage:       store,
 		SpeechKit:     stt.NewSpeechKit(cfg.YCAPIKey),
+		Summarizer:    summary.NewYandexGPT(cfg.YCAPIKey, cfg.YCFolderID, cfg.YCGPTModel),
 	}
 
 	b, err := bot.New(cfg.TelegramToken, bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, u *models.Update) {}))
