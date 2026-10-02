@@ -43,6 +43,10 @@ func (s *Store) ReplaceExtraction(ctx context.Context, in ExtractionInput) ([]Sa
 }
 
 func (s *Store) saveExtraction(ctx context.Context, in ExtractionInput, replace bool) ([]SavedSegment, error) {
+	schema, err := s.Schema(ctx)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -87,7 +91,7 @@ func (s *Store) saveExtraction(ctx context.Context, in ExtractionInput, replace 
 
 		out := SavedSegment{ID: segID, Segment: seg}
 		if ok {
-			if err := insertObservations(ctx, tx, segID, in.VoiceID, date, in.RefDate, seg.Values); err != nil {
+			if err := insertObservations(ctx, tx, schema, segID, in.VoiceID, date, in.RefDate, seg.Values); err != nil {
 				return nil, err
 			}
 			out.Date = &date
@@ -103,12 +107,12 @@ func (s *Store) saveExtraction(ctx context.Context, in ExtractionInput, replace 
 
 // insertObservations создаёт по строке на каждое упомянутое поле сегмента.
 // relation: same_day — рассказ о дне, к которому отнесено голосовое (ref), retro — о другом дне.
-func insertObservations(ctx context.Context, tx pgx.Tx, segID, voiceID int64, date, ref time.Time, values map[string]any) error {
+func insertObservations(ctx context.Context, tx pgx.Tx, schema entry.Schema, segID, voiceID int64, date, ref time.Time, values map[string]any) error {
 	relation := "retro"
 	if date.Equal(ref) {
 		relation = "same_day"
 	}
-	for _, f := range entry.Fields { // порядок Fields — детерминированный
+	for _, f := range schema.All { // порядок схемы — детерминированный
 		v, ok := values[f.Key]
 		if !ok {
 			continue

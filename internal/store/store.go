@@ -76,7 +76,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
 	}
-	return nil
+	return s.seedCategories(ctx)
 }
 
 type VoiceMessage struct {
@@ -88,18 +88,23 @@ type VoiceMessage struct {
 	ReferenceDate time.Time
 	DurationSec   int
 	Transcript    string
+	Source        string // voice (по умолчанию) | text
+	Confirmed     bool   // расшифровку подтвердил пользователь; для текстовых записей — true
 }
 
 // SaveVoice сохраняет голосовое с расшифровкой. Повторная доставка того же сообщения
 // Telegram обновляет расшифровку, а не создаёт дубль.
 func (s *Store) SaveVoice(ctx context.Context, v VoiceMessage) (int64, error) {
+	if v.Source == "" {
+		v.Source = "voice"
+	}
 	var id int64
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO voice_messages (telegram_chat_id, telegram_message_id, sent_at, logical_date, reference_date, duration_sec, transcript)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO voice_messages (telegram_chat_id, telegram_message_id, sent_at, logical_date, reference_date, duration_sec, transcript, source, confirmed)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (telegram_chat_id, telegram_message_id) DO UPDATE SET transcript = EXCLUDED.transcript
 		RETURNING id`,
-		v.ChatID, v.MessageID, v.SentAt, v.LogicalDate, v.ReferenceDate, v.DurationSec, v.Transcript).Scan(&id)
+		v.ChatID, v.MessageID, v.SentAt, v.LogicalDate, v.ReferenceDate, v.DurationSec, v.Transcript, v.Source, v.Confirmed).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("save voice: %w", err)
 	}

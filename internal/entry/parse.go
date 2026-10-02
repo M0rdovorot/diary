@@ -25,7 +25,8 @@ type Segment struct {
 
 // ParseExtraction разбирает ответ модели. Модель иногда оборачивает JSON в ```-блок или
 // добавляет пояснения, поэтому берём подстроку от первой «{» до последней «}».
-func ParseExtraction(raw string) ([]Segment, error) {
+// Значения разбираются только для активных категорий схемы: остальные ключи отбрасываются.
+func ParseExtraction(raw string, schema Schema) ([]Segment, error) {
 	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
 		return nil, errors.New("в ответе нет JSON-объекта")
@@ -56,9 +57,9 @@ func ParseExtraction(raw string) ([]Segment, error) {
 			seg.DateSource = SourceExplicit
 		}
 
-		for _, f := range Fields {
-			if v, ok := normalize(f.Kind, m[f.Key]); ok {
-				seg.Values[f.Key] = v
+		for _, c := range schema.Active() {
+			if v, ok := normalize(c.Kind, m[c.Key]); ok {
+				seg.Values[c.Key] = v
 			}
 		}
 		if len(seg.Values) > 0 {

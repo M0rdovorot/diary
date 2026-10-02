@@ -127,6 +127,7 @@ func (h *Handler) setInput(chatID int64, in pendingInput) {
 	if h.input == nil {
 		h.input = map[int64]pendingInput{}
 	}
+	in.at = time.Now()
 	h.input[chatID] = in
 }
 
@@ -140,6 +141,10 @@ func (h *Handler) pendingInput(chatID int64) (pendingInput, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	in, ok := h.input[chatID]
+	if ok && time.Since(in.at) > inputTTL {
+		delete(h.input, chatID) // ждали слишком давно: дальше обычный текст — новая запись
+		return pendingInput{}, false
+	}
 	return in, ok
 }
 
@@ -171,10 +176,13 @@ func (h *Handler) onAwaitedInput(ctx context.Context, b *bot.Bot, u *models.Upda
 		h.applyReplacements(ctx, b, m.Chat.ID, in.id, m.Text)
 	case inputWhole:
 		h.applyWhole(ctx, b, m.Chat.ID, in.id, m.Text)
+	default:
+		h.onCategoryInput(ctx, b, m.Chat.ID, in, m.Text)
 	}
 }
 
-// onPending повторно задаёт вопросы по всем записям без даты (например, после перезапуска бота).
+// onPending показывает всё, что ждёт внимания: записи без даты (повторяет вопросы) и записи
+// с неподтверждённой расшифровкой (список для выбора).
 func (h *Handler) onPending(ctx context.Context, b *bot.Bot, u *models.Update) {
 	m := u.Message
 	if !h.allowed(m.From) {
@@ -186,21 +194,40 @@ func (h *Handler) onPending(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.send(ctx, b, m.Chat.ID, "Не удалось получить список записей без даты.")
 		return
 	}
-	if len(pend) == 0 {
-		h.send(ctx, b, m.Chat.ID, "Записей без даты нет.")
+	unconfirmed, err := h.Store.UnconfirmedVoices(ctx, unconfirmedListSize)
+	if err != nil {
+		h.Log.Error("unconfirmed voices", "err", err)
+		h.send(ctx, b, m.Chat.ID, "Не удалось получить список неподтверждённых расшифровок.")
 		return
 	}
+	if len(pend) == 0 && len(unconfirmed) == 0 {
+		h.send(ctx, b, m.Chat.ID, "Всё уточнено и подтверждено: записей без даты и неподтверждённых расшифровок нет.")
+		return
+	}
+
+	schema := h.schema(ctx)
 	for i, p := range pend {
-		h.askDate(ctx, b, m.Chat.ID, p.ID, p.RefDate, i+1, len(pend), preview(p.Segment, 140))
+		h.askDate(ctx, b, m.Chat.ID, p.ID, p.RefDate, i+1, len(pend), preview(p.Segment, schema, 140))
+	}
+	if len(unconfirmed) > 0 {
+		total, _ := h.Store.CountUnconfirmed(ctx)
+		title := fmt.Sprintf("Расшифровки, ожидающие подтверждения (%d). Выберите запись: покажу текст, а вы подтвердите или исправите его.", total)
+		if total > len(unconfirmed) {
+			title = fmt.Sprintf("Расшифровки, ожидающие подтверждения (%d, показаны последние %d). Выберите запись: покажу текст, а вы подтвердите или исправите его.", total, len(unconfirmed))
+		}
+		h.sendVoiceList(ctx, b, m.Chat.ID, title, unconfirmed)
 	}
 }
 
+// unconfirmedListSize — сколько неподтверждённых записей показывать кнопками в /pending.
+const unconfirmedListSize = 20
+
 // preview — короткая выдержка из сегмента, чтобы узнать запись.
-func preview(seg entry.Segment, limit int) string {
-	text, _ := seg.Values["diary"].(string)
+func preview(seg entry.Segment, schema entry.Schema, limit int) string {
+	text, _ := seg.Values[entry.DiaryKey].(string)
 	if text == "" {
-		for _, f := range entry.Fields {
-			if s, ok := seg.Values[f.Key].(string); ok {
+		for _, c := range schema.Active() {
+			if s, ok := seg.Values[c.Key].(string); ok {
 				text = s
 				break
 			}
@@ -238,11 +265,18 @@ func (h *Handler) onDay(ctx context.Context, b *bot.Bot, u *models.Update) {
 	if len(obs) == 0 {
 		h.send(ctx, b, m.Chat.ID, "За "+date.Format("02.01.2006")+" записей нет.")
 	} else {
-		h.send(ctx, b, m.Chat.ID, entry.RenderCard(entry.BuildCard(date, h.Clock.Loc, obs)))
+		h.send(ctx, b, m.Chat.ID, entry.RenderCard(entry.BuildCard(date, h.Clock.Loc, obs), h.schema(ctx)))
 	}
 
-	if pend, err := h.Store.PendingSegments(ctx); err == nil && len(pend) > 0 {
+	pend, _ := h.Store.PendingSegments(ctx)
+	unconfirmed, _ := h.Store.CountUnconfirmed(ctx)
+	switch {
+	case len(pend) > 0 && unconfirmed > 0:
+		h.send(ctx, b, m.Chat.ID, fmt.Sprintf("Требуют внимания: записей без даты — %d, неподтверждённых расшифровок — %d. Посмотреть: /pending", len(pend), unconfirmed))
+	case len(pend) > 0:
 		h.send(ctx, b, m.Chat.ID, fmt.Sprintf("Есть записей без даты: %d — /pending", len(pend)))
+	case unconfirmed > 0:
+		h.send(ctx, b, m.Chat.ID, fmt.Sprintf("Есть неподтверждённых расшифровок: %d — /pending", unconfirmed))
 	}
 }
 

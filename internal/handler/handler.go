@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,10 +37,14 @@ type Handler struct {
 	input map[int64]pendingInput // chatID -> что сейчас ждём от пользователя текстом
 }
 
-// pendingInput — ожидаемый текстовый ввод: дата для сегмента или правка расшифровки.
+// pendingInput — ожидаемый текстовый ввод: дата для сегмента, правка расшифровки или шаг
+// настройки категорий.
 type pendingInput struct {
-	kind inputKind
-	id   int64 // id сегмента (inputDate) или голосового (inputReplace, inputWhole)
+	kind  inputKind
+	id    int64     // id сегмента (inputDate) или голосового (inputReplace, inputWhole)
+	key   string    // ключ категории (правка существующей)
+	draft *catDraft // новая категория (мастер добавления)
+	at    time.Time // когда начали ждать: по истечении inputTTL ожидание сбрасывается
 }
 
 type inputKind int
@@ -48,6 +53,17 @@ const (
 	inputDate    inputKind = iota // дата для сегмента без даты
 	inputReplace                  // список замен «было => стало»
 	inputWhole                    // новый текст расшифровки целиком
+
+	// настройка категорий (cats.go)
+	inputCatTitle    // название новой категории
+	inputCatKind     // ждём выбор типа кнопкой
+	inputCatHint     // подсказка для модели новой категории
+	inputCatUnit     // единица измерения новой числовой категории
+	inputCatGroup    // ждём выбор группы кнопкой
+	inputCatGroupNew // название новой группы (мастер или правка существующей по key)
+	inputCatRename   // новое название существующей категории
+	inputCatHintEdit // новая подсказка существующей категории
+	inputCatUnitEdit // новая единица существующей числовой категории
 )
 
 const (
@@ -55,6 +71,9 @@ const (
 	recognizeTimeout = 30 * time.Minute
 	// summarizeTimeout — лимит на разбор записи моделью.
 	summarizeTimeout = 3 * time.Minute
+	// inputTTL — сколько бот ждёт текстовый ответ (дата, правка, настройка), прежде чем снова
+	// считать обычный текст новой записью.
+	inputTTL = 30 * time.Minute
 	// referenceDateKey — настройка «рабочего дня» (/date).
 	referenceDateKey = "reference_date"
 )
@@ -70,9 +89,13 @@ func (h *Handler) Register(b *bot.Bot) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "date", bot.MatchTypeCommandStartOnly, h.onDate)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "edit", bot.MatchTypeCommandStartOnly, h.onEdit)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "pending", bot.MatchTypeCommandStartOnly, h.onPending)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "categories", bot.MatchTypeCommandStartOnly, h.onCategories)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, dateCallbackPrefix, bot.MatchTypePrefix, h.onDateCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, editCallbackPrefix, bot.MatchTypePrefix, h.onEditCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, catCallbackPrefix, bot.MatchTypePrefix, h.onCategoryCallback)
+	// ответ на вопрос бота (дата, правка, настройка) важнее, чем новая текстовая запись
 	b.RegisterHandlerMatchFunc(h.isAwaitedInput, h.onAwaitedInput)
+	b.RegisterHandlerMatchFunc(h.isTextEntry, h.onText)
 }
 
 func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
@@ -117,7 +140,7 @@ func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
 		return
 	}
 
-	h.processTranscript(ctx, b, m.Chat.ID, m.ID, sent, ref, m.Voice.Duration, text)
+	h.processTranscript(ctx, b, m.Chat.ID, m.ID, sent, ref, m.Voice.Duration, text, "voice")
 }
 
 // referenceDate возвращает выбранный /date рабочий день, а если он не выбран — fallback.
@@ -137,13 +160,14 @@ func (h *Handler) referenceDate(ctx context.Context, fallback time.Time) time.Ti
 	return d
 }
 
-// processTranscript — всё, что происходит после распознавания: сохранить расшифровку,
-// разобрать её моделью по дням, сохранить сегменты и ответить в чат.
-// ref — день, к которому отнесено голосовое (от него считаются «сегодня»/«вчера»).
-func (h *Handler) processTranscript(ctx context.Context, b *bot.Bot, chatID int64, msgID int, sent, ref time.Time, durationSec int, text string) {
+// processTranscript — всё, что происходит после получения текста: сохранить его, разобрать моделью
+// по дням, сохранить сегменты и ответить в чат. source: "voice" (после распознавания; затем бот
+// просит подтвердить расшифровку) или "text" (записано текстом, считается подтверждённым).
+// ref — день, к которому отнесена запись (от него считаются «сегодня»/«вчера»).
+func (h *Handler) processTranscript(ctx context.Context, b *bot.Bot, chatID int64, msgID int, sent, ref time.Time, durationSec int, text, source string) {
 	logical := h.Clock.LogicalDate(sent)
 
-	// сначала сохраняем расшифровку: что бы ни случилось дальше, запись не потеряется
+	// сначала сохраняем текст: что бы ни случилось дальше, запись не потеряется
 	voiceID, err := h.Store.SaveVoice(ctx, store.VoiceMessage{
 		ChatID:        chatID,
 		MessageID:     int64(msgID),
@@ -152,23 +176,84 @@ func (h *Handler) processTranscript(ctx context.Context, b *bot.Bot, chatID int6
 		ReferenceDate: ref,
 		DurationSec:   durationSec,
 		Transcript:    text,
+		Source:        source,
+		Confirmed:     source == "text",
 	})
 	if err != nil {
 		h.Log.Error("save voice", "err", err)
 	} else {
-		h.Log.Info("voice stored", "voice_id", voiceID, "reference_date", ref.Format("2006-01-02"))
+		h.Log.Info("entry stored", "voice_id", voiceID, "source", source, "reference_date", ref.Format("2006-01-02"))
 	}
 
 	h.analyze(ctx, b, chatID, voiceID, ref, logical, text, false)
+
+	if source == "voice" && voiceID != 0 {
+		h.askConfirm(ctx, b, chatID, voiceID, text)
+	}
+}
+
+// isTextEntry: обычное текстовое сообщение владельца (не команда) — новая текстовая запись.
+func (h *Handler) isTextEntry(u *models.Update) bool {
+	m := u.Message
+	return m != nil && m.Voice == nil && m.Text != "" && !strings.HasPrefix(m.Text, "/") && h.allowed(m.From)
+}
+
+// onText обрабатывает текстовую запись так же, как голосовую, но без распознавания и подтверждения.
+func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
+	m := u.Message
+	sent := time.Unix(int64(m.Date), 0)
+	ref := h.referenceDate(ctx, h.Clock.LogicalDate(sent))
+
+	ack := "Запись получена, разбираю…"
+	if !ref.Equal(h.Clock.LogicalDate(sent)) {
+		ack += "\nДень записи: " + ref.Format("02.01.2006") + " (выбран командой /date, сбросить: /date сброс)"
+	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: ack})
+
+	h.processTranscript(ctx, b, m.Chat.ID, m.ID, sent, ref, 0, strings.TrimSpace(m.Text), "text")
+}
+
+// askConfirm показывает расшифровку голосового и просит её подтвердить или поправить.
+// Пока пользователь не ответил, запись помечена как неподтверждённая (см. /pending).
+func (h *Handler) askConfirm(ctx context.Context, b *bot.Bot, chatID, voiceID int64, text string) {
+	id := strconv.FormatInt(voiceID, 10)
+	markup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
+		{Text: "✓ Верно", CallbackData: editConfirmPrefix + id},
+		{Text: "✎ Править", CallbackData: editMenuPrefix + id},
+	}}}
+
+	msg := "Расшифровка:\n" + text + "\n\nВсё верно?"
+	if len([]rune(msg)) <= 4000 {
+		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: msg, ReplyMarkup: markup}); err != nil {
+			h.Log.Error("ask confirm", "err", err)
+		}
+		return
+	}
+	// длинный текст не помещается в одно сообщение: текст отдельно, вопрос с кнопками отдельно
+	h.send(ctx, b, chatID, "Расшифровка:\n"+text)
+	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Расшифровка верна?", ReplyMarkup: markup}); err != nil {
+		h.Log.Error("ask confirm", "err", err)
+	}
+}
+
+// schema возвращает текущий набор категорий; при сбое БД — набор по умолчанию.
+func (h *Handler) schema(ctx context.Context) entry.Schema {
+	s, err := h.Store.Schema(ctx)
+	if err != nil {
+		h.Log.Error("load categories", "err", err)
+		return entry.DefaultSchema()
+	}
+	return s
 }
 
 // analyze разбирает расшифровку моделью, сохраняет сегменты и отвечает в чат.
 // replace — заменить уже сохранённые результаты этого голосового (после правки расшифровки).
 // voiceID == 0 — голосовое не удалось сохранить в базу: результат только показываем.
 func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64, ref, today time.Time, text string, replace bool) {
+	schema := h.schema(ctx)
 	sctx, cancel := context.WithTimeout(ctx, summarizeTimeout)
 	defer cancel()
-	raw, segs, err := h.Summarizer.Extract(sctx, text, ref)
+	raw, segs, promptVersion, err := h.Summarizer.Extract(sctx, text, ref, schema)
 	if err != nil {
 		// не теряем запись: при сбое разбора отдаём сырую расшифровку (она уже в базе)
 		h.Log.Error("extract", "err", err)
@@ -186,7 +271,7 @@ func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64
 
 	in := store.ExtractionInput{
 		VoiceID: voiceID, RefDate: ref, Today: today,
-		Model: h.Summarizer.Model, PromptVersion: summary.PromptVersion, Raw: raw, Segments: segs,
+		Model: h.Summarizer.Model, PromptVersion: promptVersion, Raw: raw, Segments: segs,
 	}
 	var saved []store.SavedSegment
 	if voiceID != 0 {
@@ -222,7 +307,7 @@ func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64
 	}
 	asked := 0
 	for _, sg := range saved {
-		out := entry.Render(sg.Segment, sg.Date)
+		out := entry.Render(sg.Segment, sg.Date, schema)
 		if sg.Date != nil && !sg.Date.Equal(ref) {
 			out = "Запись о другом дне — добавлена в карточку этого дня.\n\n" + out
 		}
@@ -231,7 +316,7 @@ func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64
 			asked++
 			hint := ""
 			if totalAsks > 1 {
-				hint = preview(sg.Segment, 140)
+				hint = preview(sg.Segment, schema, 140)
 			}
 			h.askDate(ctx, b, chatID, sg.ID, ref, asked, totalAsks, hint)
 		}

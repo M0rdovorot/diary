@@ -13,8 +13,12 @@ import (
 
 // DayObservations возвращает все наблюдения за день в хронологическом порядке отправки голосовых.
 func (s *Store) DayObservations(ctx context.Context, date time.Time) ([]entry.Observation, error) {
+	schema, err := s.Schema(ctx)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT o.field, o.value, o.relation, v.id, v.sent_at, v.reference_date
+		SELECT o.field, o.value, o.relation, v.id, v.sent_at, v.reference_date, v.confirmed
 		FROM observations o
 		JOIN voice_messages v ON v.id = o.voice_id
 		WHERE o.entry_date = $1
@@ -31,11 +35,11 @@ func (s *Store) DayObservations(ctx context.Context, date time.Time) ([]entry.Ob
 			raw             []byte
 			src             entry.Source
 		)
-		if err := rows.Scan(&field, &raw, &relation, &src.VoiceID, &src.SentAt, &src.Logical); err != nil {
+		if err := rows.Scan(&field, &raw, &relation, &src.VoiceID, &src.SentAt, &src.Logical, &src.Confirmed); err != nil {
 			return nil, err
 		}
 		src.Relation = relation
-		if v, ok := entry.DecodeValue(field, raw); ok {
+		if v, ok := entry.DecodeValue(schema, field, raw); ok {
 			out = append(out, entry.Observation{Field: field, Value: v, Src: src})
 		}
 	}
@@ -50,6 +54,10 @@ type PendingSegment struct {
 }
 
 func (s *Store) PendingSegments(ctx context.Context) ([]PendingSegment, error) {
+	schema, err := s.Schema(ctx)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT sg.id, v.reference_date, sg.payload
 		FROM segments sg JOIN voice_messages v ON v.id = sg.voice_id
@@ -67,7 +75,7 @@ func (s *Store) PendingSegments(ctx context.Context) ([]PendingSegment, error) {
 		if err := rows.Scan(&p.ID, &p.RefDate, &payload); err != nil {
 			return nil, err
 		}
-		p.Segment = entry.Segment{DateSource: entry.SourceUnknown, Values: entry.DecodeValues(payload)}
+		p.Segment = entry.Segment{DateSource: entry.SourceUnknown, Values: entry.DecodeValues(schema, payload)}
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -77,6 +85,10 @@ var ErrNotPending = errors.New("сегмент не найден или дата
 
 // ResolveSegment закрепляет уточнённую пользователем дату за сегментом и создаёт наблюдения.
 func (s *Store) ResolveSegment(ctx context.Context, segID int64, date time.Time) error {
+	schema, err := s.Schema(ctx)
+	if err != nil {
+		return err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -105,7 +117,7 @@ func (s *Store) ResolveSegment(ctx context.Context, segID int64, date time.Time)
 		segID, date); err != nil {
 		return fmt.Errorf("resolve segment: %w", err)
 	}
-	if err := insertObservations(ctx, tx, segID, voiceID, date, ref, entry.DecodeValues(payload)); err != nil {
+	if err := insertObservations(ctx, tx, schema, segID, voiceID, date, ref, entry.DecodeValues(schema, payload)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

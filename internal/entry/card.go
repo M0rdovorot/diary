@@ -7,10 +7,11 @@ import (
 
 // Source — откуда взята порция информации.
 type Source struct {
-	VoiceID  int64
-	SentAt   time.Time
-	Logical  time.Time // день дневника, в который отправлено голосовое
-	Relation string    // same_day | retro
+	VoiceID   int64
+	SentAt    time.Time
+	Logical   time.Time // день, к которому отнесено голосовое
+	Relation  string    // same_day | retro
+	Confirmed bool      // расшифровку подтвердил пользователь (текстовые записи подтверждены всегда)
 }
 
 type Observation struct {
@@ -54,22 +55,20 @@ func BuildCard(date time.Time, loc *time.Location, obs []Observation) Card {
 
 // CardFromSegment — карточка из одного сегмента (для ответа на конкретное голосовое; пометок нет).
 func CardFromSegment(seg Segment, date *time.Time) Card {
-	src := Source{VoiceID: 1, Relation: "same_day"}
+	src := Source{VoiceID: 1, Relation: "same_day", Confirmed: true}
 	c := Card{Loc: time.UTC, Primary: 1, Parts: map[string][]Part{}, Voices: []Source{src}}
 	if date != nil {
 		c.Date = *date
 	}
-	for _, f := range Fields {
-		if v, ok := seg.Values[f.Key]; ok {
-			c.Parts[f.Key] = []Part{{Value: v, Src: src}}
-		}
+	for key, v := range seg.Values {
+		c.Parts[key] = []Part{{Value: v, Src: src}}
 	}
 	return c
 }
 
 // DecodeValue восстанавливает типизированное значение поля из JSON, сохранённого в БД.
-func DecodeValue(field string, raw []byte) (any, bool) {
-	f, ok := Lookup(field)
+func DecodeValue(schema Schema, field string, raw []byte) (any, bool) {
+	f, ok := schema.Lookup(field)
 	if !ok {
 		return nil, false
 	}
@@ -81,14 +80,14 @@ func DecodeValue(field string, raw []byte) (any, bool) {
 }
 
 // DecodeValues разбирает payload сегмента из БД.
-func DecodeValues(raw []byte) map[string]any {
+func DecodeValues(schema Schema, raw []byte) map[string]any {
 	var m map[string]json.RawMessage
 	out := map[string]any{}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return out
 	}
 	for k, r := range m {
-		if v, ok := DecodeValue(k, r); ok {
+		if v, ok := DecodeValue(schema, k, r); ok {
 			out[k] = v
 		}
 	}

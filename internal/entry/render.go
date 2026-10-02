@@ -10,14 +10,41 @@ const notMentioned = "не упоминалось"
 
 // Render — текст сообщения для Telegram по одному сегменту (обычный текст, без markdown).
 // date == nil — дата ещё не определена.
-func Render(seg Segment, date *time.Time) string {
-	return RenderCard(CardFromSegment(seg, date))
+func Render(seg Segment, date *time.Time, schema Schema) string {
+	return RenderCard(CardFromSegment(seg, date), schema)
 }
 
-// RenderCard печатает карточку дня. Правила слияния:
+// section — раздел карточки: одна категория или группа категорий.
+type section struct {
+	title string
+	group bool
+	cats  []Category
+}
+
+// sections раскладывает активные категории по разделам. Категории одной группы попадают в один
+// раздел, который стоит там, где встретилась первая из них.
+func sections(schema Schema) []section {
+	var out []section
+	byGroup := map[string]int{}
+	for _, c := range schema.Active() {
+		if c.Group == "" {
+			out = append(out, section{title: c.Title, cats: []Category{c}})
+			continue
+		}
+		if i, ok := byGroup[c.Group]; ok {
+			out[i].cats = append(out[i].cats, c)
+			continue
+		}
+		byGroup[c.Group] = len(out)
+		out = append(out, section{title: c.Group, group: true, cats: []Category{c}})
+	}
+	return out
+}
+
+// RenderCard печатает карточку дня по активным категориям схемы. Правила слияния:
 // текст — дополняется (все порции), списки — объединяются, числа и да/нет — побеждает самое
 // свежее, при расхождении показывается «ранее». Порции не из основной записи помечаются источником.
-func RenderCard(c Card) string {
+func RenderCard(c Card, schema Schema) string {
 	var b strings.Builder
 	if c.Date.IsZero() {
 		b.WriteString("Дата: не определена")
@@ -27,64 +54,111 @@ func RenderCard(c Card) string {
 	if len(c.Voices) > 1 {
 		b.WriteString("\nЗаписи: " + c.voicesLine())
 	}
+	if c.hasUnconfirmed() {
+		b.WriteString("\n⚠ Есть неподтверждённые расшифровки — желательно проверить: /pending")
+	}
 	b.WriteString("\n\n")
 
-	section := func(title, body string) { fmt.Fprintf(&b, "%s\n%s\n\n", title, body) }
-
-	section("Дневниковая запись", c.diary())
-	section("Настроение", c.text("mood"))
-	section("Питание", c.text("food"))
-	section("Стул", c.text("stool"))
-
-	var sleep []string
-	if l := c.scalar("sleep_hours", func(v any) string { return FormatNumber(v.(float64)) + " ч" }); l != "" {
-		sleep = append(sleep, "— "+l)
+	for _, s := range sections(schema) {
+		body := c.sectionBody(s)
+		fmt.Fprintf(&b, "%s\n%s\n\n", s.title, body)
 	}
-	if q := c.textLines("sleep_quality"); len(q) > 0 {
-		for _, l := range q {
-			sleep = append(sleep, "— "+l)
-		}
-	}
-	if len(sleep) == 0 {
-		sleep = []string{notMentioned}
-	}
-	section("Сон", strings.Join(sleep, "\n"))
-
-	section("Физическое состояние", c.text("physical"))
-	section("Работа", c.text("work"))
-	section("Катя", c.text("katya"))
-	section("Основные занятия", "Успел:\n"+c.list("done")+"\nНе успел:\n"+c.list("not_done"))
-
-	yesNo := func(v any) string {
-		if v.(bool) {
-			return "да"
-		}
-		return "нет"
-	}
-	habit := func(label, key string) string {
-		if l := c.scalar(key, yesNo); l != "" {
-			return "— " + label + ": " + l
-		}
-		return "— " + label + ": " + notMentioned
-	}
-	water := "— Вода и другие жидкости: " + notMentioned
-	if l := c.scalar("water_ml", func(v any) string { return FormatNumber(v.(float64)) + " мл" }); l != "" {
-		water = "— Вода и другие жидкости: " + l
-	}
-	section("Привычки", strings.Join([]string{
-		water,
-		habit("Сладкое", "sweets"),
-		habit("Алкоголь", "alcohol"),
-		habit("Курение", "smoking"),
-		habit("Гонение лысого", "gonenie_lysogo"),
-		habit("Занятие любовью", "love"),
-		habit("Китайский чай", "tea"),
-	}, "\n"))
-
-	section("Мысли на подумать", c.list("to_think"))
-	section("Мысли для психолога", c.list("for_psychologist"))
-
 	return strings.TrimSpace(b.String())
+}
+
+// sectionBody печатает содержимое раздела.
+func (c Card) sectionBody(s section) string {
+	if !s.group {
+		return c.categoryBody(s.cats[0])
+	}
+
+	// группа: если ничего не упомянуто — одна строка, иначе строка на каждую категорию
+	mentioned := false
+	for _, cat := range s.cats {
+		if len(c.Parts[cat.Key]) > 0 {
+			mentioned = true
+			break
+		}
+	}
+	if !mentioned {
+		return notMentioned
+	}
+	var lines []string
+	for _, cat := range s.cats {
+		lines = append(lines, c.groupLines(cat)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// categoryBody — содержимое одиночной категории (раздел без группы).
+func (c Card) categoryBody(cat Category) string {
+	switch {
+	case cat.Key == DiaryKey:
+		return c.diary()
+	case cat.Kind == Text:
+		return c.text(cat.Key)
+	case cat.Kind == List:
+		return c.list(cat.Key)
+	}
+	if l := c.scalar(cat.Key, scalarFormat(cat)); l != "" {
+		return l
+	}
+	return notMentioned
+}
+
+// groupLines — строки категории внутри группы: «— Название: значение».
+func (c Card) groupLines(cat Category) []string {
+	switch cat.Kind {
+	case Text:
+		lines := c.textLines(cat.Key)
+		if len(lines) == 0 {
+			return []string{"— " + cat.Title + ": " + notMentioned}
+		}
+		out := make([]string, len(lines))
+		for i, l := range lines {
+			out[i] = "— " + cat.Title + ": " + l
+		}
+		return out
+	case List:
+		body := c.list(cat.Key)
+		if body == notMentioned {
+			return []string{"— " + cat.Title + ": " + notMentioned}
+		}
+		return []string{cat.Title + ":\n" + body}
+	}
+	if l := c.scalar(cat.Key, scalarFormat(cat)); l != "" {
+		return []string{"— " + cat.Title + ": " + l}
+	}
+	return []string{"— " + cat.Title + ": " + notMentioned}
+}
+
+// scalarFormat — как печатать значение числа или да/нет.
+func scalarFormat(cat Category) func(any) string {
+	if cat.Kind == Bool {
+		return func(v any) string {
+			if b, _ := v.(bool); b {
+				return "да"
+			}
+			return "нет"
+		}
+	}
+	return func(v any) string {
+		f, _ := v.(float64)
+		s := FormatNumber(f)
+		if cat.Unit != "" {
+			s += " " + cat.Unit
+		}
+		return s
+	}
+}
+
+func (c Card) hasUnconfirmed() bool {
+	for _, v := range c.Voices {
+		if !v.Confirmed {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Card) loc() *time.Location {
@@ -109,14 +183,19 @@ func (c Card) voicesLine() string {
 	var parts []string
 	for _, v := range c.Voices {
 		at := v.SentAt.In(c.loc())
+		var p string
 		switch {
 		case v.VoiceID == c.Primary:
-			parts = append(parts, "основная "+at.Format("02.01 15:04"))
+			p = "основная " + at.Format("02.01 15:04")
 		case v.Relation == "retro":
-			parts = append(parts, "из записи от "+v.Logical.Format("02.01")+" "+at.Format("15:04"))
+			p = "из записи от " + v.Logical.Format("02.01") + " " + at.Format("15:04")
 		default:
-			parts = append(parts, "доп. "+at.Format("15:04"))
+			p = "доп. " + at.Format("15:04")
 		}
+		if !v.Confirmed {
+			p += " ⚠"
+		}
+		parts = append(parts, p)
 	}
 	return strings.Join(parts, "; ")
 }
@@ -138,7 +217,7 @@ func (c Card) diary() string {
 		texts []string
 	}
 	var blocks []block
-	for _, p := range c.Parts["diary"] {
+	for _, p := range c.Parts[DiaryKey] {
 		t, _ := p.Value.(string)
 		if t == "" {
 			continue

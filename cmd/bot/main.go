@@ -87,7 +87,8 @@ func main() {
 		{Command: "day", Description: "Карточка дня: /day, /day 01.09, /day вчера"},
 		{Command: "date", Description: "Выбрать день для новых голосовых: /date 01.09, /date сброс"},
 		{Command: "edit", Description: "Исправить расшифровку голосового"},
-		{Command: "pending", Description: "Записи без даты"},
+		{Command: "categories", Description: "Категории записи: добавить, изменить, скрыть"},
+		{Command: "pending", Description: "Записи без даты и неподтверждённые расшифровки"},
 	}}); err != nil {
 		log.Warn("set commands", "err", err)
 	}
