@@ -20,17 +20,35 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    # Сеть хоста: бот ходит в Telegram через локальный прокси хоста (HTTPS_PROXY=127.0.0.1:…),
+    # к базе — на 127.0.0.1:5432, а сервер Mini App слушает 127.0.0.1:8080 для Caddy.
+    network_mode: host
     env_file: .env
     environment:
       DATA_DIR: /data
-      # внутри сети compose база доступна по имени сервиса
-      DATABASE_URL: postgres://diary:${POSTGRES_PASSWORD}@db:5432/diary?sslmode=disable
+      DATABASE_URL: postgres://diary:${POSTGRES_PASSWORD}@127.0.0.1:5432/diary?sslmode=disable
     volumes:
       - bot-data:/data
     depends_on:
       db:
         condition: service_healthy
 
+  # HTTPS для Mini App. Сеть хоста: Caddy сам слушает 80/443 и ходит к боту на 127.0.0.1:8080,
+  # поэтому порт бота наружу не открыт. Запуск: make web-up.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      WEBAPP_DOMAIN: ${WEBAPP_DOMAIN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    profiles: ["web"]
+
 volumes:
   bot-data:
   pgdata:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,6 @@
+# Обратный прокси для Mini App: HTTPS (сертификат Let's Encrypt выпускается и продлевается сам)
+# → HTTP-сервер бота на localhost. Домен — WEBAPP_DOMAIN из .env (например 72-56-242-50.sslip.io).
+{$WEBAPP_DOMAIN} {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080
+}

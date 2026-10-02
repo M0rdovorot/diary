@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,10 @@ type Config struct {
 	YCS3SecretKey string
 	YCS3Endpoint  string
 	YCS3Region    string
+
+	// WebAppURL — публичный HTTPS-адрес Mini App (календаря); пусто — веб-интерфейс выключен.
+	WebAppURL  string
+	WebAppAddr string // где слушает HTTP-сервер Mini App (за обратным прокси с TLS)
 }
 
 func Load() (*Config, error) {
@@ -42,6 +47,8 @@ func Load() (*Config, error) {
 		YCS3SecretKey: os.Getenv("YC_S3_SECRET_ACCESS_KEY"),
 		YCS3Endpoint:  os.Getenv("YC_S3_ENDPOINT"),
 		YCS3Region:    os.Getenv("YC_S3_REGION"),
+		WebAppURL:     os.Getenv("WEBAPP_URL"),
+		WebAppAddr:    os.Getenv("WEBAPP_ADDR"),
 	}
 	for name, v := range map[string]string{
 		"DATABASE_URL":            c.DatabaseURL,
@@ -82,6 +89,12 @@ func Load() (*Config, error) {
 	}
 	if c.YCS3Region == "" {
 		c.YCS3Region = "ru-central1"
+	}
+	if c.WebAppURL != "" && !strings.HasPrefix(c.WebAppURL, "https://") {
+		return nil, errors.New("WEBAPP_URL must start with https:// (Telegram opens Mini Apps only over HTTPS)")
+	}
+	if c.WebAppAddr == "" {
+		c.WebAppAddr = ":8080"
 	}
 	if c.TelegramToken == "" {
 		return nil, errors.New("TELEGRAM_BOT_TOKEN is required")

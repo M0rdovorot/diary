@@ -1,4 +1,4 @@
-.PHONY: run build vet test db-up db-down psql backup restore docker-up docker-down docker-logs tidy clean-data
+.PHONY: run build vet test db-up db-down psql backup restore docker-up docker-down docker-logs web-up web-down web-logs tidy clean-data
 
 BIN := bin/bot
 
@@ -53,6 +53,16 @@ docker-down:
 
 docker-logs:
 	docker compose logs -f bot
+
+# HTTPS-прокси (Caddy) для Mini App; домен — WEBAPP_DOMAIN из .env.
+web-up:
+	docker compose --profile web up -d caddy
+
+web-down:
+	docker compose --profile web stop caddy
+
+web-logs:
+	docker compose --profile web logs -f caddy
 
 clean-data:
 	rm -rf data

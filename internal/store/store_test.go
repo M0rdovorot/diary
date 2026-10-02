@@ -606,3 +606,56 @@ func TestDeleteVoiceCascades(t *testing.T) {
 		t.Errorf("impact несуществующей: %v", err)
 	}
 }
+
+func TestMonthDaysAndDayVoices(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	d := func(day int) time.Time { return time.Date(2026, 9, day, 0, 0, 0, 0, time.UTC) }
+	save := func(msg int64, confirmed bool, transcript string, segs ...entry.Segment) int64 {
+		id, err := s.SaveVoice(ctx, VoiceMessage{ChatID: 1, MessageID: msg, SentAt: time.Date(2026, 9, 5, 10, int(msg), 0, 0, time.UTC),
+			LogicalDate: d(5), ReferenceDate: d(5), DurationSec: 1, Transcript: transcript, Confirmed: confirmed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveExtraction(ctx, ExtractionInput{VoiceID: id, RefDate: d(5), Today: d(5), Model: "m", PromptVersion: "v", Raw: "r",
+			Segments: segs}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	seg := func(date string, v map[string]any) entry.Segment {
+		ds := entry.SourceExplicit
+		if date == "" {
+			ds = entry.SourceUnknown
+		}
+		return entry.Segment{Date: date, DateSource: ds, Values: v}
+	}
+	// 05.09: две записи, одна не подтверждена; вторая ещё рассказывает про 01.09
+	v1 := save(1, true, "первая", seg("2026-09-05", map[string]any{"mood": "ок", "food": "суп"}))
+	v2 := save(2, false, "вторая полностью", seg("2026-09-05", map[string]any{"mood": "лучше"}), seg("2026-09-01", map[string]any{"sleep_hours": 6.0}))
+	// без даты — в календарь не попадает
+	save(3, false, "без даты", seg("", map[string]any{"katya": "скучаю"}))
+	// за пределами месяца
+	save(4, true, "август", seg("2026-08-31", map[string]any{"mood": "так себе"}))
+
+	days, err := s.MonthDays(ctx, d(1), d(30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(days) != 2 ||
+		!days[0].Date.Equal(d(1)) || days[0].Entries != 1 || days[0].Unconfirmed != 1 ||
+		!days[1].Date.Equal(d(5)) || days[1].Entries != 2 || days[1].Unconfirmed != 1 {
+		t.Fatalf("days: %+v", days)
+	}
+
+	voices, err := s.DayVoices(ctx, d(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(voices) != 2 || voices[0].ID != v1 || voices[1].ID != v2 || voices[1].Transcript != "вторая полностью" || voices[1].Confirmed {
+		t.Fatalf("voices: %+v", voices)
+	}
+	if voices, _ := s.DayVoices(ctx, d(2)); len(voices) != 0 {
+		t.Errorf("пустой день: %+v", voices)
+	}
+}

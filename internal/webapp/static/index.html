@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Дневник</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<main id="app">
+  <section id="calendar" class="screen">
+    <header class="month-nav">
+      <button id="prev" class="nav" aria-label="Предыдущий месяц">‹</button>
+      <h1 id="month-title"></h1>
+      <button id="next" class="nav" aria-label="Следующий месяц">›</button>
+    </header>
+    <div class="weekdays"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
+    <div id="grid" class="grid"></div>
+    <p class="legend"><span class="dot"></span> есть записи &nbsp; <span class="warn">⚠</span> есть неподтверждённые</p>
+    <p id="attention" class="attention" hidden></p>
+  </section>
+
+  <section id="day" class="screen" hidden>
+    <header class="day-head">
+      <button id="back" class="back">‹ Календарь</button>
+      <h1 id="day-title"></h1>
+    </header>
+    <div class="day-layout">
+      <aside class="voices">
+        <h2 id="voices-title">Записи</h2>
+        <ul id="voices"></ul>
+      </aside>
+      <article id="card" class="card"></article>
+    </div>
+  </section>
+
+  <p id="status" class="status" hidden></p>
+</main>
+</body>
+</html>

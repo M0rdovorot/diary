@@ -32,6 +32,7 @@ type Handler struct {
 	Summarizer    *summary.YandexGPT
 	Store         *store.Store
 	Clock         diaryday.Clock
+	WebAppURL     string // адрес Mini App с календарём; пусто — /calendar сообщает, что не настроен
 
 	mu    sync.Mutex
 	input map[int64]pendingInput // chatID -> что сейчас ждём от пользователя текстом
@@ -90,6 +91,7 @@ func (h *Handler) Register(b *bot.Bot) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "edit", bot.MatchTypeCommandStartOnly, h.onEdit)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "pending", bot.MatchTypeCommandStartOnly, h.onPending)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "categories", bot.MatchTypeCommandStartOnly, h.onCategories)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "calendar", bot.MatchTypeCommandStartOnly, h.onCalendar)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, dateCallbackPrefix, bot.MatchTypePrefix, h.onDateCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, editCallbackPrefix, bot.MatchTypePrefix, h.onEditCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, catCallbackPrefix, bot.MatchTypePrefix, h.onCategoryCallback)

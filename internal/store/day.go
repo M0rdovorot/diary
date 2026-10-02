@@ -122,3 +122,59 @@ func (s *Store) ResolveSegment(ctx context.Context, segID int64, date time.Time)
 	}
 	return tx.Commit(ctx)
 }
+
+// DaySummary — день календаря, за который есть данные в карточке.
+type DaySummary struct {
+	Date        time.Time
+	Entries     int // сколько записей попало в карточку дня
+	Unconfirmed int // из них с неподтверждённой расшифровкой
+}
+
+// MonthDays возвращает дни из [from, to], у которых есть наблюдения (то есть непустая карточка),
+// по возрастанию даты. Записи без уточнённой даты в карточки не попадают и здесь не считаются.
+func (s *Store) MonthDays(ctx context.Context, from, to time.Time) ([]DaySummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT o.entry_date, count(DISTINCT v.id), count(DISTINCT v.id) FILTER (WHERE NOT v.confirmed)
+		FROM observations o
+		JOIN voice_messages v ON v.id = o.voice_id
+		WHERE o.entry_date BETWEEN $1 AND $2
+		GROUP BY o.entry_date
+		ORDER BY o.entry_date`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DaySummary
+	for rows.Next() {
+		var d DaySummary
+		if err := rows.Scan(&d.Date, &d.Entries, &d.Unconfirmed); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// DayVoices — записи, из которых собрана карточка дня (есть наблюдения за этот день), с полной
+// расшифровкой, в порядке отправки.
+func (s *Store) DayVoices(ctx context.Context, date time.Time) ([]Voice, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+voiceColumns+`, v.transcript
+		FROM voice_messages v
+		WHERE EXISTS (SELECT 1 FROM observations o WHERE o.voice_id = v.id AND o.entry_date = $1)
+		ORDER BY v.sent_at, v.id`, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Voice
+	for rows.Next() {
+		var v Voice
+		if err := rows.Scan(&v.ID, &v.SentAt, &v.LogicalDate, &v.ReferenceDate, &v.DurationSec, &v.Preview,
+			&v.Edited, &v.Source, &v.Confirmed, &v.Transcript); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}

@@ -18,6 +18,7 @@ import (
 	"diary/internal/store"
 	"diary/internal/stt"
 	"diary/internal/summary"
+	"diary/internal/webapp"
 )
 
 func main() {
@@ -72,6 +73,7 @@ func main() {
 		Clock:         clock,
 		SpeechKit:     stt.NewSpeechKit(cfg.YCAPIKey),
 		Summarizer:    summary.NewYandexGPT(cfg.YCAPIKey, cfg.YCFolderID, cfg.YCGPTModel),
+		WebAppURL:     cfg.WebAppURL,
 	}
 
 	b, err := bot.New(cfg.TelegramToken, bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, u *models.Update) {}))
@@ -85,12 +87,31 @@ func main() {
 	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: []models.BotCommand{
 		{Command: "help", Description: "Все команды и как всё работает"},
 		{Command: "day", Description: "Карточка дня: /day, /day 01.09, /day вчера"},
+		{Command: "calendar", Description: "Календарь дней с записями"},
 		{Command: "date", Description: "Выбрать день для новых голосовых: /date 01.09, /date сброс"},
 		{Command: "edit", Description: "Исправить расшифровку голосового"},
 		{Command: "categories", Description: "Категории записи: добавить, изменить, скрыть"},
 		{Command: "pending", Description: "Записи без даты и неподтверждённые расшифровки"},
 	}}); err != nil {
 		log.Warn("set commands", "err", err)
+	}
+
+	// кнопка меню слева от поля ввода: календарь, если он настроен, иначе список команд
+	var menu models.InputMenuButton = models.MenuButtonCommands{Type: models.MenuButtonTypeCommands}
+	if cfg.WebAppURL != "" {
+		menu = models.MenuButtonWebApp{Type: models.MenuButtonTypeWebApp, Text: "Календарь", WebApp: models.WebAppInfo{URL: cfg.WebAppURL}}
+	}
+	if _, err := b.SetChatMenuButton(ctx, &bot.SetChatMenuButtonParams{MenuButton: menu}); err != nil {
+		log.Warn("set menu button", "err", err)
+	}
+
+	if cfg.WebAppURL != "" {
+		web := &webapp.Server{Log: log, Store: db, Clock: clock, BotToken: cfg.TelegramToken, AllowedUserID: cfg.AllowedUserID}
+		go func() {
+			if err := web.Run(ctx, cfg.WebAppAddr); err != nil {
+				log.Error("webapp", "err", err)
+			}
+		}()
 	}
 
 	log.Info("bot started")
