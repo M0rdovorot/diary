@@ -6,12 +6,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"diary/internal/cleanup"
 	"diary/internal/config"
+	"diary/internal/diaryday"
 	"diary/internal/handler"
+	"diary/internal/store"
 	"diary/internal/stt"
 	"diary/internal/summary"
 )
@@ -28,7 +32,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := stt.NewStorage(stt.StorageConfig{
+	clock, err := diaryday.NewClock(cfg.DiaryTZ, cfg.DayCutoff)
+	if err != nil {
+		log.Error("timezone", "tz", cfg.DiaryTZ, "err", err)
+		os.Exit(1)
+	}
+
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Error("db", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		log.Error("migrate", "err", err)
+		os.Exit(1)
+	}
+
+	s3, err := stt.NewStorage(stt.StorageConfig{
 		Endpoint:  cfg.YCS3Endpoint,
 		Region:    cfg.YCS3Region,
 		Bucket:    cfg.YCBucket,
@@ -40,11 +61,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	go cleanup.Run(ctx, log, cfg.DataDir, cfg.DataRetention, 24*time.Hour)
+
 	h := &handler.Handler{
 		Log:           log,
 		AllowedUserID: cfg.AllowedUserID,
 		DataDir:       cfg.DataDir,
-		Storage:       store,
+		Storage:       s3,
+		Store:         db,
+		Clock:         clock,
 		SpeechKit:     stt.NewSpeechKit(cfg.YCAPIKey),
 		Summarizer:    summary.NewYandexGPT(cfg.YCAPIKey, cfg.YCFolderID, cfg.YCGPTModel),
 	}
@@ -55,6 +80,17 @@ func main() {
 		os.Exit(1)
 	}
 	h.Register(b)
+
+	// меню команд в Telegram; сбой не критичен
+	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: []models.BotCommand{
+		{Command: "help", Description: "Все команды и как всё работает"},
+		{Command: "day", Description: "Карточка дня: /day, /day 01.09, /day вчера"},
+		{Command: "date", Description: "Выбрать день для новых голосовых: /date 01.09, /date сброс"},
+		{Command: "edit", Description: "Исправить расшифровку голосового"},
+		{Command: "pending", Description: "Записи без даты"},
+	}}); err != nil {
+		log.Warn("set commands", "err", err)
+	}
 
 	log.Info("bot started")
 	b.Start(ctx)

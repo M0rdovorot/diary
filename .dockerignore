@@ -1,4 +1,6 @@
 .env
+.git
 data/
-bin/
 backups/
+bin/
+*.ogg

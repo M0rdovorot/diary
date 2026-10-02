@@ -1,0 +1,112 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"diary/internal/entry"
+)
+
+// DayObservations возвращает все наблюдения за день в хронологическом порядке отправки голосовых.
+func (s *Store) DayObservations(ctx context.Context, date time.Time) ([]entry.Observation, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT o.field, o.value, o.relation, v.id, v.sent_at, v.reference_date
+		FROM observations o
+		JOIN voice_messages v ON v.id = o.voice_id
+		WHERE o.entry_date = $1
+		ORDER BY v.sent_at, o.id`, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []entry.Observation
+	for rows.Next() {
+		var (
+			field, relation string
+			raw             []byte
+			src             entry.Source
+		)
+		if err := rows.Scan(&field, &raw, &relation, &src.VoiceID, &src.SentAt, &src.Logical); err != nil {
+			return nil, err
+		}
+		src.Relation = relation
+		if v, ok := entry.DecodeValue(field, raw); ok {
+			out = append(out, entry.Observation{Field: field, Value: v, Src: src})
+		}
+	}
+	return out, rows.Err()
+}
+
+// PendingSegment — сегмент, ждущий уточнения даты.
+type PendingSegment struct {
+	ID      int64
+	RefDate time.Time // день, к которому отнесено голосовое
+	Segment entry.Segment
+}
+
+func (s *Store) PendingSegments(ctx context.Context) ([]PendingSegment, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT sg.id, v.reference_date, sg.payload
+		FROM segments sg JOIN voice_messages v ON v.id = sg.voice_id
+		WHERE sg.status = 'pending_date'
+		ORDER BY sg.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PendingSegment
+	for rows.Next() {
+		var p PendingSegment
+		var payload []byte
+		if err := rows.Scan(&p.ID, &p.RefDate, &payload); err != nil {
+			return nil, err
+		}
+		p.Segment = entry.Segment{DateSource: entry.SourceUnknown, Values: entry.DecodeValues(payload)}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+var ErrNotPending = errors.New("сегмент не найден или дата уже уточнена")
+
+// ResolveSegment закрепляет уточнённую пользователем дату за сегментом и создаёт наблюдения.
+func (s *Store) ResolveSegment(ctx context.Context, segID int64, date time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var (
+		voiceID int64
+		ref     time.Time
+		payload []byte
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT sg.voice_id, v.reference_date, sg.payload
+		FROM segments sg JOIN voice_messages v ON v.id = sg.voice_id
+		WHERE sg.id = $1 AND sg.status = 'pending_date'
+		FOR UPDATE OF sg`, segID).Scan(&voiceID, &ref, &payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotPending
+	}
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE segments SET entry_date = $2, date_source = 'user', status = 'resolved' WHERE id = $1`,
+		segID, date); err != nil {
+		return fmt.Errorf("resolve segment: %w", err)
+	}
+	if err := insertObservations(ctx, tx, segID, voiceID, date, ref, entry.DecodeValues(payload)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

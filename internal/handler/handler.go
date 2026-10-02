@@ -9,11 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"diary/internal/diaryday"
+	"diary/internal/entry"
+	"diary/internal/store"
 	"diary/internal/stt"
 	"diary/internal/summary"
 )
@@ -25,19 +29,50 @@ type Handler struct {
 	Storage       *stt.Storage
 	SpeechKit     *stt.SpeechKit
 	Summarizer    *summary.YandexGPT
+	Store         *store.Store
+	Clock         diaryday.Clock
+
+	mu    sync.Mutex
+	input map[int64]pendingInput // chatID -> что сейчас ждём от пользователя текстом
 }
+
+// pendingInput — ожидаемый текстовый ввод: дата для сегмента или правка расшифровки.
+type pendingInput struct {
+	kind inputKind
+	id   int64 // id сегмента (inputDate) или голосового (inputReplace, inputWhole)
+}
+
+type inputKind int
+
+const (
+	inputDate    inputKind = iota // дата для сегмента без даты
+	inputReplace                  // список замен «было => стало»
+	inputWhole                    // новый текст расшифровки целиком
+)
 
 const (
 	// recognizeTimeout — общий лимит на загрузку и распознавание одного голосового.
 	recognizeTimeout = 30 * time.Minute
-	// summarizeTimeout — лимит на саммаризацию.
+	// summarizeTimeout — лимит на разбор записи моделью.
 	summarizeTimeout = 3 * time.Minute
+	// referenceDateKey — настройка «рабочего дня» (/date).
+	referenceDateKey = "reference_date"
 )
 
+// Register добавляет хендлеры. Порядок важен: срабатывает первый подходящий.
 func (h *Handler) Register(b *bot.Bot) {
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.Message != nil && u.Message.Voice != nil
 	}, h.onVoice)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommandStartOnly, h.onHelp)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "start", bot.MatchTypeCommandStartOnly, h.onHelp)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "day", bot.MatchTypeCommandStartOnly, h.onDay)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "date", bot.MatchTypeCommandStartOnly, h.onDate)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "edit", bot.MatchTypeCommandStartOnly, h.onEdit)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "pending", bot.MatchTypeCommandStartOnly, h.onPending)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, dateCallbackPrefix, bot.MatchTypePrefix, h.onDateCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, editCallbackPrefix, bot.MatchTypePrefix, h.onEditCallback)
+	b.RegisterHandlerMatchFunc(h.isAwaitedInput, h.onAwaitedInput)
 }
 
 func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
@@ -47,24 +82,34 @@ func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
 		return
 	}
 
+	sent := time.Unix(int64(m.Date), 0)
+	// день записи фиксируем в момент получения: выбранный /date или день отправки
+	ref := h.referenceDate(ctx, h.Clock.LogicalDate(sent))
+
 	path, err := h.download(ctx, b, m.Voice.FileID, m.ID)
 	if err != nil {
 		h.Log.Error("download voice", "err", err)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: "Не удалось скачать голосовое"})
 		return
 	}
-	h.Log.Info("voice saved", "path", path, "duration_s", m.Voice.Duration)
+	h.Log.Info("voice downloaded", "path", path, "duration_s", m.Voice.Duration)
 
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: m.Chat.ID,
-		Text:   fmt.Sprintf("Голосовое получено (%d с), распознаю…", m.Voice.Duration),
-	})
+	ack := fmt.Sprintf("Голосовое получено (%d с), распознаю…", m.Voice.Duration)
+	if !ref.Equal(h.Clock.LogicalDate(sent)) {
+		ack += "\nДень записи: " + ref.Format("02.01.2006") + " (выбран командой /date, сбросить: /date сброс)"
+	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: ack})
 
 	text, err := h.transcribe(ctx, path)
 	if err != nil {
+		// файл остаётся на диске: его подметёт cleanup по сроку хранения
 		h.Log.Error("transcribe", "err", err)
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: "Не удалось распознать голосовое"})
 		return
+	}
+	// аудио больше не нужно: текст получен, а в Telegram оригинал остаётся
+	if err := os.Remove(path); err != nil {
+		h.Log.Warn("remove audio", "path", path, "err", err)
 	}
 	h.Log.Info("transcribed", "chars", len(text))
 	if text == "" {
@@ -72,27 +117,139 @@ func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
 		return
 	}
 
-	sctx, cancel := context.WithTimeout(ctx, summarizeTimeout)
-	defer cancel()
-	sum, err := h.Summarizer.Summarize(sctx, text, sentAt(m.Date))
-	if err != nil {
-		// не теряем запись: при сбое саммаризации отдаём сырую расшифровку
-		h.Log.Error("summarize", "err", err)
-		h.send(ctx, b, m.Chat.ID, "Не удалось сделать саммари, вот расшифровка:")
-		h.send(ctx, b, m.Chat.ID, text)
-		return
-	}
-	h.Log.Info("summarized", "chars", len(sum))
-	h.send(ctx, b, m.Chat.ID, sum)
+	h.processTranscript(ctx, b, m.Chat.ID, m.ID, sent, ref, m.Voice.Duration, text)
 }
 
-// sentAt переводит unix-время сообщения в московское время (пользователь живёт по МСК).
-func sentAt(unix int) time.Time {
-	loc, err := time.LoadLocation("Europe/Moscow")
+// referenceDate возвращает выбранный /date рабочий день, а если он не выбран — fallback.
+func (h *Handler) referenceDate(ctx context.Context, fallback time.Time) time.Time {
+	v, ok, err := h.Store.Setting(ctx, referenceDateKey)
 	if err != nil {
-		loc = time.FixedZone("MSK", 3*60*60)
+		h.Log.Error("read reference date", "err", err)
+		return fallback
 	}
-	return time.Unix(int64(unix), 0).In(loc)
+	if !ok {
+		return fallback
+	}
+	d, err := time.Parse("2006-01-02", v)
+	if err != nil {
+		return fallback
+	}
+	return d
+}
+
+// processTranscript — всё, что происходит после распознавания: сохранить расшифровку,
+// разобрать её моделью по дням, сохранить сегменты и ответить в чат.
+// ref — день, к которому отнесено голосовое (от него считаются «сегодня»/«вчера»).
+func (h *Handler) processTranscript(ctx context.Context, b *bot.Bot, chatID int64, msgID int, sent, ref time.Time, durationSec int, text string) {
+	logical := h.Clock.LogicalDate(sent)
+
+	// сначала сохраняем расшифровку: что бы ни случилось дальше, запись не потеряется
+	voiceID, err := h.Store.SaveVoice(ctx, store.VoiceMessage{
+		ChatID:        chatID,
+		MessageID:     int64(msgID),
+		SentAt:        sent,
+		LogicalDate:   logical,
+		ReferenceDate: ref,
+		DurationSec:   durationSec,
+		Transcript:    text,
+	})
+	if err != nil {
+		h.Log.Error("save voice", "err", err)
+	} else {
+		h.Log.Info("voice stored", "voice_id", voiceID, "reference_date", ref.Format("2006-01-02"))
+	}
+
+	h.analyze(ctx, b, chatID, voiceID, ref, logical, text, false)
+}
+
+// analyze разбирает расшифровку моделью, сохраняет сегменты и отвечает в чат.
+// replace — заменить уже сохранённые результаты этого голосового (после правки расшифровки).
+// voiceID == 0 — голосовое не удалось сохранить в базу: результат только показываем.
+func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64, ref, today time.Time, text string, replace bool) {
+	sctx, cancel := context.WithTimeout(ctx, summarizeTimeout)
+	defer cancel()
+	raw, segs, err := h.Summarizer.Extract(sctx, text, ref)
+	if err != nil {
+		// не теряем запись: при сбое разбора отдаём сырую расшифровку (она уже в базе)
+		h.Log.Error("extract", "err", err)
+		if replace {
+			h.send(ctx, b, chatID, "Расшифровка сохранена, но пересобрать запись не удалось: прежняя версия записи осталась без изменений.")
+		} else {
+			h.send(ctx, b, chatID, "Не удалось разобрать запись, вот расшифровка:")
+			h.send(ctx, b, chatID, text)
+		}
+		if voiceID != 0 {
+			h.offerRedo(ctx, b, chatID, voiceID)
+		}
+		return
+	}
+
+	in := store.ExtractionInput{
+		VoiceID: voiceID, RefDate: ref, Today: today,
+		Model: h.Summarizer.Model, PromptVersion: summary.PromptVersion, Raw: raw, Segments: segs,
+	}
+	var saved []store.SavedSegment
+	if voiceID != 0 {
+		if replace {
+			saved, err = h.Store.ReplaceExtraction(ctx, in)
+		} else {
+			saved, err = h.Store.SaveExtraction(ctx, in)
+		}
+		if err != nil {
+			h.Log.Error("save extraction", "err", err)
+			saved = nil
+		}
+	}
+	if saved == nil {
+		// база недоступна: всё равно показываем результат, но без сохранения
+		h.send(ctx, b, chatID, "Внимание: запись не удалось сохранить в базу.")
+		for _, seg := range segs {
+			sg := store.SavedSegment{Segment: seg}
+			if d, ok := seg.ResolvedDate(today); ok {
+				sg.Date = &d
+			}
+			saved = append(saved, sg)
+		}
+	}
+	h.Log.Info("extracted", "segments", len(saved), "replace", replace)
+
+	// вопросов о дате может быть несколько: нумеруем их и даём выдержку, чтобы различать
+	totalAsks := 0
+	for _, sg := range saved {
+		if sg.Date == nil && sg.ID != 0 {
+			totalAsks++
+		}
+	}
+	asked := 0
+	for _, sg := range saved {
+		out := entry.Render(sg.Segment, sg.Date)
+		if sg.Date != nil && !sg.Date.Equal(ref) {
+			out = "Запись о другом дне — добавлена в карточку этого дня.\n\n" + out
+		}
+		h.send(ctx, b, chatID, out)
+		if sg.Date == nil && sg.ID != 0 {
+			asked++
+			hint := ""
+			if totalAsks > 1 {
+				hint = preview(sg.Segment, 140)
+			}
+			h.askDate(ctx, b, chatID, sg.ID, ref, asked, totalAsks, hint)
+		}
+	}
+}
+
+// offerRedo предлагает повторить разбор сохранённой расшифровки (например, после сбоя модели).
+func (h *Handler) offerRedo(ctx context.Context, b *bot.Bot, chatID, voiceID int64) {
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "Повторить разбор записи?",
+		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
+			{Text: "Повторить разбор", CallbackData: fmt.Sprintf("%s%d", editRedoPrefix, voiceID)},
+		}}},
+	})
+	if err != nil {
+		h.Log.Error("offer redo", "err", err)
+	}
 }
 
 // send отправляет текст, разбивая его на части под лимит Telegram (4096 символов).

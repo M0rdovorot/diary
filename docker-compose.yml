@@ -1,12 +1,36 @@
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: diary
+      POSTGRES_DB: diary
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # порт открыт только на localhost (для make run / psql); наружу не выставляется
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U diary -d diary"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   bot:
     build: .
     restart: unless-stopped
     env_file: .env
     environment:
       DATA_DIR: /data
+      # внутри сети compose база доступна по имени сервиса
+      DATABASE_URL: postgres://diary:${POSTGRES_PASSWORD}@db:5432/diary?sslmode=disable
     volumes:
       - bot-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   bot-data:
+  pgdata:

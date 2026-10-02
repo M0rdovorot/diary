@@ -4,12 +4,19 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
 	TelegramToken string
 	AllowedUserID int64
 	DataDir       string
+	// DataRetention — через сколько локальные .ogg, оставшиеся после неудачной обработки, удаляются.
+	DataRetention time.Duration
+
+	DatabaseURL string
+	DiaryTZ     string // часовой пояс пользователя
+	DayCutoff   int    // час, до которого момент относится к предыдущему дню дневника
 
 	YCAPIKey      string
 	YCFolderID    string
@@ -25,6 +32,8 @@ func Load() (*Config, error) {
 	c := &Config{
 		TelegramToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		DataDir:       os.Getenv("DATA_DIR"),
+		DatabaseURL:   os.Getenv("DATABASE_URL"),
+		DiaryTZ:       os.Getenv("DIARY_TZ"),
 		YCAPIKey:      os.Getenv("YC_API_KEY"),
 		YCFolderID:    os.Getenv("YC_FOLDER_ID"),
 		YCGPTModel:    os.Getenv("YC_GPT_MODEL"),
@@ -35,6 +44,7 @@ func Load() (*Config, error) {
 		YCS3Region:    os.Getenv("YC_S3_REGION"),
 	}
 	for name, v := range map[string]string{
+		"DATABASE_URL":            c.DatabaseURL,
 		"YC_API_KEY":              c.YCAPIKey,
 		"YC_FOLDER_ID":            c.YCFolderID,
 		"YC_BUCKET":               c.YCBucket,
@@ -44,6 +54,25 @@ func Load() (*Config, error) {
 		if v == "" {
 			return nil, errors.New(name + " is required")
 		}
+	}
+	if c.DiaryTZ == "" {
+		c.DiaryTZ = "Europe/Moscow"
+	}
+	c.DataRetention = 7 * 24 * time.Hour
+	if v := os.Getenv("DATA_RETENTION_DAYS"); v != "" {
+		d, err := strconv.Atoi(v)
+		if err != nil || d < 1 {
+			return nil, errors.New("DATA_RETENTION_DAYS must be a positive integer")
+		}
+		c.DataRetention = time.Duration(d) * 24 * time.Hour
+	}
+	c.DayCutoff = 5
+	if v := os.Getenv("DAY_CUTOFF_HOUR"); v != "" {
+		h, err := strconv.Atoi(v)
+		if err != nil || h < 0 || h > 12 {
+			return nil, errors.New("DAY_CUTOFF_HOUR must be an integer 0..12")
+		}
+		c.DayCutoff = h
 	}
 	if c.YCGPTModel == "" {
 		c.YCGPTModel = "yandexgpt/latest" // YandexGPT Pro

@@ -11,13 +11,14 @@ import (
 	"time"
 )
 
-const completionURL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+const defaultCompletionURL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 type YandexGPT struct {
 	APIKey   string
 	FolderID string
 	Model    string // например "yandexgpt/latest" (Pro) или "yandexgpt-lite/latest"
 	HTTP     *http.Client
+	URL      string // по умолчанию боевой адрес API; переопределяется в тестах
 }
 
 func NewYandexGPT(apiKey, folderID, model string) *YandexGPT {
@@ -26,6 +27,7 @@ func NewYandexGPT(apiKey, folderID, model string) *YandexGPT {
 		FolderID: folderID,
 		Model:    model,
 		HTTP:     &http.Client{Timeout: 2 * time.Minute},
+		URL:      defaultCompletionURL,
 	}
 }
 
@@ -53,23 +55,22 @@ type completionResponse struct {
 	} `json:"result"`
 }
 
-// Summarize превращает расшифровку голосового в структурированную дневниковую запись.
-// sentAt — время отправки голосового, по нему модель пересчитывает «вчера»/«сегодня» в дату.
-func (g *YandexGPT) Summarize(ctx context.Context, transcript string, sentAt time.Time) (string, error) {
+// Complete отправляет пару system/user и возвращает текст ответа модели.
+func (g *YandexGPT) Complete(ctx context.Context, system, user string) (string, error) {
 	var req completionRequest
 	req.ModelURI = fmt.Sprintf("gpt://%s/%s", g.FolderID, g.Model)
-	req.CompletionOptions.Temperature = 0.3
-	req.CompletionOptions.MaxTokens = "3000"
+	req.CompletionOptions.Temperature = 0.2
+	req.CompletionOptions.MaxTokens = "4000"
 	req.Messages = []message{
-		{Role: "system", Text: SystemPrompt},
-		{Role: "user", Text: fmt.Sprintf("Дата отправки голосового: %s.\n\nРасшифровка:\n%s", sentAt.Format("02.01.2006"), transcript)},
+		{Role: "system", Text: system},
+		{Role: "user", Text: user},
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", err
 	}
 
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, completionURL, bytes.NewReader(body))
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.URL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
