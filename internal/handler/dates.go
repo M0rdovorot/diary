@@ -207,7 +207,7 @@ func (h *Handler) onPending(ctx context.Context, b *bot.Bot, u *models.Update) {
 
 	schema := h.schema(ctx)
 	for i, p := range pend {
-		h.askDate(ctx, b, m.Chat.ID, p.ID, p.RefDate, i+1, len(pend), preview(p.Segment, schema, 140))
+		h.askDate(ctx, b, m.Chat.ID, p.ID, p.RefDate, i+1, len(pend), entry.Preview(p.Segment, schema, 140))
 	}
 	if len(unconfirmed) > 0 {
 		total, _ := h.Store.CountUnconfirmed(ctx)
@@ -221,23 +221,6 @@ func (h *Handler) onPending(ctx context.Context, b *bot.Bot, u *models.Update) {
 
 // unconfirmedListSize — сколько неподтверждённых записей показывать кнопками в /pending.
 const unconfirmedListSize = 20
-
-// preview — короткая выдержка из сегмента, чтобы узнать запись.
-func preview(seg entry.Segment, schema entry.Schema, limit int) string {
-	text, _ := seg.Values[entry.DiaryKey].(string)
-	if text == "" {
-		for _, c := range schema.Active() {
-			if s, ok := seg.Values[c.Key].(string); ok {
-				text = s
-				break
-			}
-		}
-	}
-	if r := []rune(text); len(r) > limit {
-		text = string(r[:limit]) + "…"
-	}
-	return text
-}
 
 // onDay показывает собранную карточку дня: /day, /day 01.09, /day 01.09.2026, /day вчера.
 func (h *Handler) onDay(ctx context.Context, b *bot.Bot, u *models.Update) {

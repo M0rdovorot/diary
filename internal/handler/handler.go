@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -253,12 +254,9 @@ func (h *Handler) schema(ctx context.Context) entry.Schema {
 // voiceID == 0 — голосовое не удалось сохранить в базу: результат только показываем.
 func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64, ref, today time.Time, text string, replace bool) {
 	schema := h.schema(ctx)
-	sctx, cancel := context.WithTimeout(ctx, summarizeTimeout)
-	defer cancel()
-	raw, segs, promptVersion, err := h.Summarizer.Extract(sctx, text, ref, schema)
-	if err != nil {
+	segs, saved, err := h.extractAndSave(ctx, schema, voiceID, ref, today, text, replace)
+	if errors.Is(err, errExtract) {
 		// не теряем запись: при сбое разбора отдаём сырую расшифровку (она уже в базе)
-		h.Log.Error("extract", "err", err)
 		if replace {
 			h.send(ctx, b, chatID, "Расшифровка сохранена, но пересобрать запись не удалось: прежняя версия записи осталась без изменений.")
 		} else {
@@ -271,22 +269,6 @@ func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64
 		return
 	}
 
-	in := store.ExtractionInput{
-		VoiceID: voiceID, RefDate: ref, Today: today,
-		Model: h.Summarizer.Model, PromptVersion: promptVersion, Raw: raw, Segments: segs,
-	}
-	var saved []store.SavedSegment
-	if voiceID != 0 {
-		if replace {
-			saved, err = h.Store.ReplaceExtraction(ctx, in)
-		} else {
-			saved, err = h.Store.SaveExtraction(ctx, in)
-		}
-		if err != nil {
-			h.Log.Error("save extraction", "err", err)
-			saved = nil
-		}
-	}
 	if saved == nil {
 		// база недоступна: всё равно показываем результат, но без сохранения
 		h.send(ctx, b, chatID, "Внимание: запись не удалось сохранить в базу.")
@@ -318,11 +300,52 @@ func (h *Handler) analyze(ctx context.Context, b *bot.Bot, chatID, voiceID int64
 			asked++
 			hint := ""
 			if totalAsks > 1 {
-				hint = preview(sg.Segment, schema, 140)
+				hint = entry.Preview(sg.Segment, schema, 140)
 			}
 			h.askDate(ctx, b, chatID, sg.ID, ref, asked, totalAsks, hint)
 		}
 	}
+}
+
+// errExtract — модель не смогла разобрать запись (сама запись при этом сохранена).
+var errExtract = errors.New("не удалось разобрать запись")
+
+// extractAndSave разбирает текст моделью по текущей схеме категорий и сохраняет сегменты
+// (replace — заменить прежний разбор этой записи). Ошибка errExtract — модель не справилась,
+// прежний разбор не тронут; другая ошибка — разбор есть (segs), но в базу не сохранился.
+// voiceID == 0 — запись не сохранена в базу: только разбираем.
+func (h *Handler) extractAndSave(ctx context.Context, schema entry.Schema, voiceID int64, ref, today time.Time, text string, replace bool) (segs []entry.Segment, saved []store.SavedSegment, err error) {
+	sctx, cancel := context.WithTimeout(ctx, summarizeTimeout)
+	defer cancel()
+	raw, segs, promptVersion, err := h.Summarizer.Extract(sctx, text, ref, schema)
+	if err != nil {
+		h.Log.Error("extract", "voice_id", voiceID, "err", err)
+		return nil, nil, fmt.Errorf("%w: %v", errExtract, err)
+	}
+	if voiceID == 0 {
+		return segs, nil, errors.New("запись не сохранена")
+	}
+	in := store.ExtractionInput{
+		VoiceID: voiceID, RefDate: ref, Today: today,
+		Model: h.Summarizer.Model, PromptVersion: promptVersion, Raw: raw, Segments: segs,
+	}
+	if replace {
+		saved, err = h.Store.ReplaceExtraction(ctx, in)
+	} else {
+		saved, err = h.Store.SaveExtraction(ctx, in)
+	}
+	if err != nil {
+		h.Log.Error("save extraction", "voice_id", voiceID, "err", err)
+		return segs, nil, err
+	}
+	return segs, saved, nil
+}
+
+// Analyze — разбор сохранённой записи для Mini App: то же, что после сообщения в чате, но без ответов
+// в чат. Возвращает сохранённые сегменты (Date == nil — день нужно уточнить).
+func (h *Handler) Analyze(ctx context.Context, voiceID int64, ref, today time.Time, text string, replace bool) ([]store.SavedSegment, error) {
+	_, saved, err := h.extractAndSave(ctx, h.schema(ctx), voiceID, ref, today, text, replace)
+	return saved, err
 }
 
 // offerRedo предлагает повторить разбор сохранённой расшифровки (например, после сбоя модели).

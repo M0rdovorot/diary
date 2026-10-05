@@ -15,17 +15,21 @@
       <button id="prev" class="nav" aria-label="Предыдущий месяц">‹</button>
       <h1 id="month-title"></h1>
       <button id="next" class="nav" aria-label="Следующий месяц">›</button>
+      <button id="new-entry" class="pencil" aria-label="Новая запись" title="Новая запись">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+      </button>
     </header>
     <div class="weekdays"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
     <div id="grid" class="grid"></div>
-    <p class="legend"><span class="dot"></span> есть записи &nbsp; <span class="warn">⚠</span> есть неподтверждённые</p>
-    <p id="attention" class="attention" hidden></p>
+    <p class="legend"><span class="dot"></span> есть записи &nbsp; <span class="warn">⚠</span> есть неподтверждённые &nbsp; пустой день — нажмите, чтобы добавить</p>
+    <div id="todo" class="todo"></div>
   </section>
 
   <section id="day" class="screen" hidden>
     <header class="day-head">
       <button id="back" class="back">‹ Календарь</button>
       <h1 id="day-title"></h1>
+      <button id="day-add" class="btn">+ Добавить запись на этот день</button>
     </header>
     <div class="day-layout">
       <aside class="voices">
@@ -36,7 +40,27 @@
     </div>
   </section>
 
+  <section id="compose" class="screen" hidden>
+    <header class="day-head">
+      <button id="compose-back" class="back">‹ Назад</button>
+      <h1>Новая запись</h1>
+    </header>
+    <form id="compose-form" class="compose">
+      <label class="field">День записи
+        <input id="compose-date" type="date" required>
+      </label>
+      <p class="hint">«Сегодня» и «вчера» в тексте считаются от этого дня. Можно рассказать и о других днях — запись разложится по ним.</p>
+      <textarea id="compose-text" rows="10" placeholder="Как прошёл день…" required></textarea>
+      <div class="compose-foot">
+        <span id="compose-count" class="hint"></span>
+        <button id="compose-save" class="btn primary" type="submit">Сохранить</button>
+      </div>
+    </form>
+    <div id="compose-result" class="result" hidden></div>
+  </section>
+
   <p id="status" class="status" hidden></p>
+  <div id="toast" class="toast" hidden></div>
 </main>
 </body>
 </html>

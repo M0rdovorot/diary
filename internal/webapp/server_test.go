@@ -16,8 +16,16 @@ import (
 	"diary/internal/store"
 )
 
+// fakeStore — хранилище для тестов чтения; методы записи не реализованы (вызов — паника).
 type fakeStore struct {
+	Store
 	from, to time.Time
+}
+
+func (f *fakeStore) UnanalyzedVoices(context.Context, int) ([]store.Voice, error) { return nil, nil }
+
+func (f *fakeStore) GetVoice(context.Context, int64) (store.Voice, error) {
+	return store.Voice{}, store.ErrNotFound
 }
 
 func (f *fakeStore) Schema(context.Context) (entry.Schema, error) {
@@ -47,7 +55,8 @@ func (f *fakeStore) MonthDays(_ context.Context, from, to time.Time) ([]store.Da
 }
 
 func (f *fakeStore) PendingSegments(context.Context) ([]store.PendingSegment, error) {
-	return []store.PendingSegment{{ID: 7}}, nil
+	return []store.PendingSegment{{ID: 7, VoiceID: 3, RefDate: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC),
+		Segment: entry.Segment{Values: map[string]any{"katya": "скучаю"}}}}, nil
 }
 
 func (f *fakeStore) CountUnconfirmed(context.Context) (int, error) { return 1, nil }
@@ -111,7 +120,8 @@ func TestAPIMonth(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Month != "2026-10" || m.Today != "2026-10-02" || m.Pending != 1 || m.Unconfirmed != 1 ||
+	if m.Month != "2026-10" || m.Today != "2026-10-02" || m.MinDate != "2024-10-02" || m.Unconfirmed != 1 ||
+		len(m.Pending) != 1 || m.Pending[0] != (pendingPart{ID: 7, Voice: 3, RefDate: "2026-09-05", Entry: "Запись на 05.09.2026", Preview: "скучаю"}) ||
 		len(m.Days) != 1 || m.Days[0] != (monthDay{Date: "2026-09-05", Entries: 1, Unconfirmed: 1}) {
 		t.Errorf("month: %+v", m)
 	}

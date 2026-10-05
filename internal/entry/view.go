@@ -50,12 +50,14 @@ func (it ItemView) Mentioned() bool { return len(it.Blocks) > 0 || len(it.Values
 type BlockView struct {
 	Header string   `json:"header"` // «Основная запись · 21:40», «Дополнение · 23:10», «Дополнение из записи от 05.09 · 08:15»
 	Texts  []string `json:"texts"`
+	Voice  int64    `json:"voice"` // запись, из которой взята порция
 }
 
 // ValueView — значение с пометкой происхождения; у основной записи пометки нет.
 type ValueView struct {
-	Text string `json:"text"`
-	Mark string `json:"mark,omitempty"` // «доп. запись 23:10», «из записи от 05.09»
+	Text  string `json:"text"`
+	Mark  string `json:"mark,omitempty"` // «доп. запись 23:10», «из записи от 05.09»
+	Voice int64  `json:"voice"`          // запись, из которой взято значение
 }
 
 // View собирает карточку по активным категориям схемы.
@@ -117,7 +119,7 @@ func (c Card) item(cat Category) ItemView {
 	case cat.Kind == Text:
 		for _, p := range c.Parts[cat.Key] {
 			if s, ok := p.Value.(string); ok {
-				it.Values = append(it.Values, ValueView{Text: s, Mark: c.mark(p.Src)})
+				it.Values = append(it.Values, ValueView{Text: s, Mark: c.mark(p.Src), Voice: p.Src.VoiceID})
 			}
 		}
 	case cat.Kind == List:
@@ -127,7 +129,7 @@ func (c Card) item(cat Category) ItemView {
 			for _, s := range items {
 				if !seen[s] {
 					seen[s] = true
-					it.Values = append(it.Values, ValueView{Text: s, Mark: c.mark(p.Src)})
+					it.Values = append(it.Values, ValueView{Text: s, Mark: c.mark(p.Src), Voice: p.Src.VoiceID})
 				}
 			}
 		}
@@ -138,12 +140,12 @@ func (c Card) item(cat Category) ItemView {
 		}
 		format := scalarFormat(cat)
 		last := parts[len(parts)-1]
-		it.Values = []ValueView{{Text: format(last.Value), Mark: c.mark(last.Src)}}
+		it.Values = []ValueView{{Text: format(last.Value), Mark: c.mark(last.Src), Voice: last.Src.VoiceID}}
 		seen := map[string]bool{format(last.Value): true}
 		for _, p := range parts[:len(parts)-1] {
 			if s := format(p.Value); !seen[s] {
 				seen[s] = true
-				it.Earlier = append(it.Earlier, ValueView{Text: s, Mark: c.mark(p.Src)})
+				it.Earlier = append(it.Earlier, ValueView{Text: s, Mark: c.mark(p.Src), Voice: p.Src.VoiceID})
 			}
 		}
 	}
@@ -170,11 +172,11 @@ func (c Card) diaryBlocks() []BlockView {
 		blocks = append(blocks, block{src: p.Src, texts: []string{t}})
 	}
 	if len(blocks) == 1 && blocks[0].src.VoiceID == c.Primary {
-		return []BlockView{{Texts: blocks[0].texts}}
+		return []BlockView{{Texts: blocks[0].texts, Voice: blocks[0].src.VoiceID}}
 	}
 	var out []BlockView
 	for _, b := range blocks {
-		out = append(out, BlockView{Header: c.blockHeader(b.src), Texts: b.texts})
+		out = append(out, BlockView{Header: c.blockHeader(b.src), Texts: b.texts, Voice: b.src.VoiceID})
 	}
 	return out
 }

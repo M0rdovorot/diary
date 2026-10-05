@@ -49,6 +49,7 @@ func (s *Store) DayObservations(ctx context.Context, date time.Time) ([]entry.Ob
 // PendingSegment — сегмент, ждущий уточнения даты.
 type PendingSegment struct {
 	ID      int64
+	VoiceID int64
 	RefDate time.Time // день, к которому отнесено голосовое
 	Segment entry.Segment
 }
@@ -59,7 +60,7 @@ func (s *Store) PendingSegments(ctx context.Context) ([]PendingSegment, error) {
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT sg.id, v.reference_date, sg.payload
+		SELECT sg.id, sg.voice_id, v.reference_date, sg.payload
 		FROM segments sg JOIN voice_messages v ON v.id = sg.voice_id
 		WHERE sg.status = 'pending_date'
 		ORDER BY sg.id`)
@@ -72,7 +73,7 @@ func (s *Store) PendingSegments(ctx context.Context) ([]PendingSegment, error) {
 	for rows.Next() {
 		var p PendingSegment
 		var payload []byte
-		if err := rows.Scan(&p.ID, &p.RefDate, &payload); err != nil {
+		if err := rows.Scan(&p.ID, &p.VoiceID, &p.RefDate, &payload); err != nil {
 			return nil, err
 		}
 		p.Segment = entry.Segment{DateSource: entry.SourceUnknown, Values: entry.DecodeValues(schema, payload)}
@@ -177,4 +178,10 @@ func (s *Store) DayVoices(ctx context.Context, date time.Time) ([]Voice, error) 
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// UnanalyzedVoices — записи, для которых нет ни одного сохранённого разбора (модель не справилась
+// или бот перезапустился во время разбора), новые первыми.
+func (s *Store) UnanalyzedVoices(ctx context.Context, limit int) ([]Voice, error) {
+	return s.listVoices(ctx, `WHERE NOT EXISTS (SELECT 1 FROM extractions e WHERE e.voice_id = v.id)`, limit)
 }

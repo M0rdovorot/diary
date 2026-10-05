@@ -106,7 +106,15 @@ func main() {
 	}
 
 	if cfg.WebAppURL != "" {
-		web := &webapp.Server{Log: log, Store: db, Clock: clock, BotToken: cfg.TelegramToken, AllowedUserID: cfg.AllowedUserID}
+		web := &webapp.Server{
+			Log: log, Store: db, Analyzer: h, Clock: clock, BotToken: cfg.TelegramToken, AllowedUserID: cfg.AllowedUserID,
+			// действия в Mini App коротко дублируются в чат с владельцем (личный чат: chat_id = user_id)
+			Notify: func(ctx context.Context, text string) {
+				if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: cfg.AllowedUserID, Text: text}); err != nil {
+					log.Warn("webapp notify", "err", err)
+				}
+			},
+		}
 		go func() {
 			if err := web.Run(ctx, cfg.WebAppAddr); err != nil {
 				log.Error("webapp", "err", err)

@@ -1,4 +1,4 @@
-// Package webapp — Telegram Mini App: календарь дней и карточка выбранного дня (только чтение).
+// Package webapp — Telegram Mini App: календарь дней, карточка дня, добавление и правка записей.
 // HTTP-сервер отдаёт вшитую статику и JSON API; каждый запрос к API подписан Telegram
 // (initData), чужие и неподписанные запросы отклоняются.
 package webapp
@@ -27,7 +27,7 @@ var staticFiles embed.FS
 // если приложение открыто дольше, его нужно переоткрыть.
 const initDataMaxAge = 24 * time.Hour
 
-// Store — данные, которые читает веб-интерфейс.
+// Store — данные, которые читает и меняет веб-интерфейс.
 type Store interface {
 	Schema(ctx context.Context) (entry.Schema, error)
 	DayObservations(ctx context.Context, date time.Time) ([]entry.Observation, error)
@@ -35,15 +35,34 @@ type Store interface {
 	MonthDays(ctx context.Context, from, to time.Time) ([]store.DaySummary, error)
 	PendingSegments(ctx context.Context) ([]store.PendingSegment, error)
 	CountUnconfirmed(ctx context.Context) (int, error)
+	UnanalyzedVoices(ctx context.Context, limit int) ([]store.Voice, error)
+
+	SaveVoice(ctx context.Context, v store.VoiceMessage) (int64, error)
+	GetVoice(ctx context.Context, id int64) (store.Voice, error)
+	UpdateTranscript(ctx context.Context, voiceID int64, newText string) error
+	ConfirmVoice(ctx context.Context, voiceID int64) error
+	VoiceImpact(ctx context.Context, id int64) (store.VoiceImpact, error)
+	DeleteVoice(ctx context.Context, id int64) (store.VoiceImpact, error)
+	ResolveSegment(ctx context.Context, segID int64, date time.Time) error
+}
+
+// Analyzer разбирает сохранённую запись моделью и сохраняет сегменты (тот же разбор, что в чате).
+type Analyzer interface {
+	Analyze(ctx context.Context, voiceID int64, ref, today time.Time, text string, replace bool) ([]store.SavedSegment, error)
 }
 
 type Server struct {
 	Log           *slog.Logger
 	Store         Store
+	Analyzer      Analyzer
 	Clock         diaryday.Clock
 	BotToken      string
 	AllowedUserID int64
-	now           func() time.Time // для тестов
+	// Notify отправляет владельцу короткое сообщение в чат о действии в Mini App; nil — не отправлять.
+	Notify func(ctx context.Context, text string)
+
+	now  func() time.Time // для тестов
+	jobs jobs
 }
 
 // Handler — все маршруты: статика на «/», API на «/api/».
@@ -54,6 +73,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }) //nolint:errcheck
 	mux.Handle("GET /api/month", s.auth(s.month))
 	mux.Handle("GET /api/day", s.auth(s.day))
+	mux.Handle("POST /api/entries", s.auth(s.addEntry))
+	mux.Handle("GET /api/entries/{id}", s.auth(s.entryStatus))
+	mux.Handle("GET /api/entries/{id}/impact", s.auth(s.entryImpact))
+	mux.Handle("PUT /api/entries/{id}/text", s.auth(s.editEntry))
+	mux.Handle("POST /api/entries/{id}/reanalyze", s.auth(s.reanalyzeEntry))
+	mux.Handle("POST /api/entries/{id}/confirm", s.auth(s.confirmEntry))
+	mux.Handle("DELETE /api/entries/{id}", s.auth(s.deleteEntry))
+	mux.Handle("POST /api/segments/{id}/date", s.auth(s.resolveSegment))
 	return s.logged(secure(mux))
 }
 
@@ -143,11 +170,28 @@ func (s *Server) clock() time.Time {
 }
 
 type monthResponse struct {
-	Month       string     `json:"month"` // ГГГГ-ММ
-	Today       string     `json:"today"` // текущий день дневника, ГГГГ-ММ-ДД
-	Days        []monthDay `json:"days"`
-	Pending     int        `json:"pending"`     // записей без даты (во всей базе)
-	Unconfirmed int        `json:"unconfirmed"` // неподтверждённых расшифровок (во всей базе)
+	Month       string        `json:"month"` // ГГГГ-ММ
+	Today       string        `json:"today"` // текущий день дневника, ГГГГ-ММ-ДД
+	MinDate     string        `json:"minDate"`
+	Days        []monthDay    `json:"days"`
+	Pending     []pendingPart `json:"pending"`     // части записей без даты (во всей базе)
+	Unanalyzed  []entryBrief  `json:"unanalyzed"`  // записи без разбора (во всей базе)
+	Unconfirmed int           `json:"unconfirmed"` // неподтверждённых расшифровок (во всей базе)
+}
+
+// pendingPart — часть записи, для которой модель не определила день.
+type pendingPart struct {
+	ID      int64  `json:"id"`
+	Voice   int64  `json:"voice"`
+	RefDate string `json:"refDate"` // день записи: от него предлагаются «этот день / предыдущий»
+	Entry   string `json:"entry"`   // «Запись на 05.09.2026 (21:40)»
+	Preview string `json:"preview"`
+}
+
+type entryBrief struct {
+	ID      int64  `json:"id"`
+	Label   string `json:"label"`
+	Preview string `json:"preview"`
 }
 
 type monthDay struct {
@@ -176,9 +220,14 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "month days", err)
 		return
 	}
-	pending, err := s.Store.PendingSegments(ctx)
+	pending, err := s.pendingParts(ctx, 0)
 	if err != nil {
 		s.fail(w, "pending segments", err)
+		return
+	}
+	unanalyzed, err := s.Store.UnanalyzedVoices(ctx, 20)
+	if err != nil {
+		s.fail(w, "unanalyzed voices", err)
 		return
 	}
 	unconfirmed, err := s.Store.CountUnconfirmed(ctx)
@@ -188,8 +237,14 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := monthResponse{
-		Month: first.Format("2006-01"), Today: today.Format("2006-01-02"),
-		Days: []monthDay{}, Pending: len(pending), Unconfirmed: unconfirmed,
+		Month: first.Format("2006-01"), Today: today.Format("2006-01-02"), MinDate: s.minDate(today).Format("2006-01-02"),
+		Days: []monthDay{}, Pending: pending, Unanalyzed: []entryBrief{}, Unconfirmed: unconfirmed,
+	}
+	for _, v := range unanalyzed {
+		if s.jobs.running(v.ID) {
+			continue // разбор идёт прямо сейчас
+		}
+		resp.Unanalyzed = append(resp.Unanalyzed, entryBrief{ID: v.ID, Label: s.voiceLabel(v), Preview: v.Preview})
 	}
 	for _, d := range days {
 		resp.Days = append(resp.Days, monthDay{Date: d.Date.Format("2006-01-02"), Entries: d.Entries, Unconfirmed: d.Unconfirmed})
@@ -207,8 +262,11 @@ type dayResponse struct {
 type dayVoice struct {
 	ID        int64  `json:"id"`
 	Label     string `json:"label"` // «Голосовое · 05.09 21:40 · 1:23» / «Текст · 05.09 21:40»
+	Source    string `json:"source"`
+	RefDate   string `json:"refDate"` // день записи
 	Confirmed bool   `json:"confirmed"`
 	Edited    bool   `json:"edited"`
+	Busy      bool   `json:"busy"` // запись сейчас разбирается
 	Text      string `json:"text"`
 }
 
@@ -248,7 +306,8 @@ func (s *Server) day(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, v := range voices {
 		resp.Voices = append(resp.Voices, dayVoice{
-			ID: v.ID, Label: s.voiceLabel(v), Confirmed: v.Confirmed, Edited: v.Edited, Text: v.Transcript,
+			ID: v.ID, Label: s.voiceLabel(v), Source: v.Source, RefDate: v.ReferenceDate.Format("2006-01-02"),
+			Confirmed: v.Confirmed, Edited: v.Edited, Busy: s.jobs.running(v.ID), Text: v.Transcript,
 		})
 	}
 	writeJSON(w, resp)

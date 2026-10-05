@@ -150,3 +150,21 @@ func normalize(k Kind, v any) (any, bool) {
 	}
 	return nil, false
 }
+
+// Preview — короткая выдержка из сегмента, чтобы узнать запись: дневниковый текст или первое
+// текстовое значение по порядку категорий.
+func Preview(seg Segment, schema Schema, limit int) string {
+	text, _ := seg.Values[DiaryKey].(string)
+	if text == "" {
+		for _, c := range schema.Active() {
+			if s, ok := seg.Values[c.Key].(string); ok {
+				text = s
+				break
+			}
+		}
+	}
+	if r := []rune(text); len(r) > limit {
+		text = string(r[:limit]) + "…"
+	}
+	return text
+}

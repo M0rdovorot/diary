@@ -81,7 +81,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 type VoiceMessage struct {
 	ChatID      int64
-	MessageID   int64
+	MessageID   int64 // 0 — запись не из сообщения Telegram (добавлена через Mini App)
 	SentAt      time.Time
 	LogicalDate time.Time // день дневника на момент отправки
 	// ReferenceDate — день, к которому голосовое отнесено («рабочий день»); без выбора равен LogicalDate.
@@ -98,13 +98,18 @@ func (s *Store) SaveVoice(ctx context.Context, v VoiceMessage) (int64, error) {
 	if v.Source == "" {
 		v.Source = "voice"
 	}
+	// запись из Mini App не связана с сообщением Telegram
+	var msgID any = v.MessageID
+	if v.MessageID == 0 {
+		msgID = nil
+	}
 	var id int64
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO voice_messages (telegram_chat_id, telegram_message_id, sent_at, logical_date, reference_date, duration_sec, transcript, source, confirmed)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (telegram_chat_id, telegram_message_id) DO UPDATE SET transcript = EXCLUDED.transcript
 		RETURNING id`,
-		v.ChatID, v.MessageID, v.SentAt, v.LogicalDate, v.ReferenceDate, v.DurationSec, v.Transcript, v.Source, v.Confirmed).Scan(&id)
+		v.ChatID, msgID, v.SentAt, v.LogicalDate, v.ReferenceDate, v.DurationSec, v.Transcript, v.Source, v.Confirmed).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("save voice: %w", err)
 	}
