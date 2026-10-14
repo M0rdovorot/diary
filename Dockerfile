@@ -6,6 +6,6 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /bot ./cmd/bot
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 COPY --from=build /bot /bot
 ENTRYPOINT ["/bot"]

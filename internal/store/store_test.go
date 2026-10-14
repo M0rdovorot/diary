@@ -659,3 +659,136 @@ func TestMonthDaysAndDayVoices(t *testing.T) {
 		t.Errorf("пустой день: %+v", voices)
 	}
 }
+
+// Новые категории по умолчанию появляются в уже существующей базе — в конце списка, не сбивая
+// порядок и настройки пользователя.
+func TestSeedAddsMissingDefaultsAtEnd(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.pool.Exec(ctx, `DELETE FROM categories WHERE key IN ('cinema', 'key_thoughts')`); err != nil {
+		t.Fatal(err)
+	}
+	title := "Моё настроение"
+	if err := s.UpdateCategory(ctx, "mood", CategoryUpdate{Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MoveCategory(ctx, "mood", 1); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.Categories(ctx)
+
+	if err := s.Migrate(ctx); err != nil { // как при следующем запуске бота
+		t.Fatal(err)
+	}
+	after, _ := s.Categories(ctx)
+	if len(after) != len(before)+2 {
+		t.Fatalf("было %d, стало %d", len(before), len(after))
+	}
+	for i, c := range before { // прежний порядок и правки не тронуты
+		if after[i].Key != c.Key || after[i].Title != c.Title {
+			t.Fatalf("порядок или название изменились на %d: %+v → %+v", i, c, after[i])
+		}
+	}
+	tail := after[len(after)-2:]
+	if tail[0].Key != "cinema" || tail[1].Key != "key_thoughts" || !tail[0].Active || tail[0].Position <= before[len(before)-1].Position {
+		t.Errorf("новые категории должны встать в конец: %+v", tail)
+	}
+}
+
+func TestDeleteCategoryAndCategoryObservations(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	d1 := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	d2 := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	id, err := s.SaveVoice(ctx, VoiceMessage{ChatID: 1, MessageID: 1, SentAt: time.Now(), LogicalDate: d2, ReferenceDate: d2, DurationSec: 1, Transcript: "t", Confirmed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.SaveExtraction(ctx, ExtractionInput{VoiceID: id, RefDate: d2, Today: d2, Model: "m", PromptVersion: "v", Raw: "{}", Segments: []entry.Segment{
+		{Date: "2026-09-06", DateSource: entry.SourceExplicit, Values: map[string]any{"key_thoughts": []string{"мысль 1"}, "mood": "ок"}},
+		{Date: "2026-09-05", DateSource: entry.SourceExplicit, Values: map[string]any{"key_thoughts": []string{"мысль 2"}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := s.CategoryObservations(ctx, "key_thoughts")
+	if err != nil || len(obs) != 2 || !obs[0].Date.Equal(d1) || !obs[1].Date.Equal(d2) {
+		t.Fatalf("наблюдения по категории (по возрастанию дня): %+v err=%v", obs, err)
+	}
+	if got := obs[1].Value.([]string); len(got) != 1 || got[0] != "мысль 1" || obs[1].Src.VoiceID != id {
+		t.Errorf("значение: %+v", obs[1])
+	}
+	use, _ := s.CategoryUsage(ctx)
+	if use["key_thoughts"] != (CategoryUse{Observations: 2, Days: 2}) || use["mood"].Days != 1 {
+		t.Errorf("usage: %+v", use)
+	}
+
+	// удалить можно только скрытую; diary — никогда
+	if _, err := s.DeleteCategory(ctx, "key_thoughts"); !errors.Is(err, ErrNotHidden) {
+		t.Errorf("активная: %v", err)
+	}
+	if _, err := s.DeleteCategory(ctx, entry.DiaryKey); !errors.Is(err, ErrProtected) {
+		t.Errorf("diary: %v", err)
+	}
+	if _, err := s.DeleteCategory(ctx, "нет"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("нет такой: %v", err)
+	}
+	off := false
+	if err := s.UpdateCategory(ctx, "key_thoughts", CategoryUpdate{Active: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if obs, _ := s.CategoryObservations(ctx, "key_thoughts"); len(obs) != 2 {
+		t.Errorf("скрытие не должно стирать данные: %d", len(obs))
+	}
+	n, err := s.DeleteCategory(ctx, "key_thoughts")
+	if err != nil || n != 2 {
+		t.Fatalf("delete: %d %v", n, err)
+	}
+	// остальное не тронуто, самой категории нет
+	if day, _ := s.DayObservations(ctx, d2); len(day) != 1 || day[0].Field != "mood" {
+		t.Errorf("день после удаления: %+v", day)
+	}
+	if schema, _ := s.Schema(ctx); func() bool { _, ok := schema.Lookup("key_thoughts"); return ok }() {
+		t.Error("категория осталась")
+	}
+}
+
+func TestRebuildPlan(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	d := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	mk := func(msg int64, seg entry.Segment) int64 {
+		id, err := s.SaveVoice(ctx, VoiceMessage{ChatID: 1, MessageID: msg, SentAt: time.Now().Add(time.Duration(msg) * time.Minute), LogicalDate: d, ReferenceDate: d, DurationSec: 1, Transcript: "t", Confirmed: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveExtraction(ctx, ExtractionInput{VoiceID: id, RefDate: d, Today: d, Model: "m", PromptVersion: "v", Raw: "{}", Segments: []entry.Segment{seg}}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	a := mk(1, entry.Segment{Date: "2026-09-05", DateSource: entry.SourceExplicit, Values: map[string]any{"mood": "ок", "hobby": "гитара"}})
+	mk(2, entry.Segment{Date: "2026-09-04", DateSource: entry.SourceExplicit, Values: map[string]any{"mood": "так себе"}})
+	// запись без разбора тоже входит в «все»
+	if _, err := s.SaveVoice(ctx, VoiceMessage{ChatID: 1, MessageID: 3, SentAt: time.Now().Add(time.Hour), LogicalDate: d, ReferenceDate: d, DurationSec: 1, Transcript: "t3", Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	if err := s.UpdateCategory(ctx, "hobby", CategoryUpdate{Active: &off}); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := s.RebuildPlanFor(ctx, nil)
+	if err != nil || len(all.VoiceIDs) != 3 || all.Days != 2 || all.HiddenObs != 1 || all.UserDates != 0 {
+		t.Fatalf("все: %+v err=%v", all, err)
+	}
+	day, err := s.RebuildPlanFor(ctx, &d)
+	if err != nil || len(day.VoiceIDs) != 1 || day.VoiceIDs[0] != a || day.Days != 1 || day.HiddenObs != 1 {
+		t.Fatalf("день: %+v err=%v", day, err)
+	}
+	none := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if p, err := s.RebuildPlanFor(ctx, &none); err != nil || len(p.VoiceIDs) != 0 || p.Days != 0 {
+		t.Errorf("пустой день: %+v err=%v", p, err)
+	}
+}

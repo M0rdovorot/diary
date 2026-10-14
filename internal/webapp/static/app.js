@@ -118,11 +118,12 @@ function showStatus(text) {
 
 // ---------- навигация ----------
 
-const state = { month: null, today: null, minDate: null, cache: new Map(), day: null, stack: ['calendar'] };
+const state = { month: null, today: null, minDate: null, canRecord: false, cache: new Map(), day: null, stack: ['calendar'] };
+const SCREENS = ['calendar', 'day', 'compose', 'categories', 'catedit', 'catdays'];
 
 function showScreen(name, push = true) {
   if (push && state.stack[state.stack.length - 1] !== name) state.stack.push(name);
-  for (const s of ['calendar', 'day', 'compose']) $(s).hidden = s !== name;
+  for (const s of SCREENS) $(s).hidden = s !== name;
   if (tg && tg.BackButton) {
     if (name === 'calendar') tg.BackButton.hide(); else tg.BackButton.show();
   }
@@ -132,10 +133,12 @@ function showScreen(name, push = true) {
 async function goBack() {
   if (state.stack.length <= 1) return;
   if (!$('compose').hidden && composeDirty() && !(await confirmBox('Закрыть форму? Несохранённый текст пропадёт.'))) return;
+  if (!$('compose').hidden) resetRecorder();
   state.stack.pop();
   const prev = state.stack[state.stack.length - 1];
   setClosingConfirmation(false);
-  if (prev === 'day' && state.day) await openDay(state.day, false);
+  if (prev === 'categories') { showScreen('categories', false); await openCategories(false); }
+  else if (prev === 'day' && state.day) await openDay(state.day, false);
   else if (prev === 'calendar') { showScreen('calendar', false); await openMonth(state.month, true); }
   else showScreen(prev, false);
 }
@@ -177,6 +180,7 @@ async function openMonth(key, fresh) {
   state.month = data.month;
   state.today = data.today;
   state.minDate = data.minDate;
+  state.canRecord = !!data.canRecord;
   renderMonth(data);
 }
 
@@ -234,7 +238,9 @@ function renderTodo(data) {
       el('p', 'hint', 'Текст сохранён, но модель его не разобрала (сбой или перезапуск бота).'));
     for (const u of data.unanalyzed) {
       const card = el('div', 'todo-item', el('div', 'todo-title', u.label), el('div', 'todo-preview', u.preview));
-      const actions = el('div', 'actions', button('↻ Разобрать', 'primary', (b) => reanalyze(u.id, b, card, () => openMonth(state.month, true))));
+      const actions = el('div', 'actions',
+        button('↻ Разобрать', 'primary', (b) => reanalyze(u.id, b, card, () => openMonth(state.month, true))),
+        button('🗑 Удалить', 'danger', (b) => deleteVoice({ id: u.id }, b, () => openMonth(state.month, true))));
       card.append(actions);
       box.append(card);
     }
@@ -291,6 +297,7 @@ async function openDay(date, push = true) {
     alertBox(e.message);
     return;
   }
+  if (state.day !== date) $('day-rebuild-box').hidden = true; // итог пересборки другого дня здесь не нужен
   state.day = date;
   $('day-title').textContent = data.title;
   renderVoices(data.voices);
@@ -446,7 +453,7 @@ async function reanalyze(id, b, container, done) {
   }
 }
 
-async function deleteVoice(v, b) {
+async function deleteVoice(v, b, done) {
   let imp;
   try {
     imp = await api('/api/entries/' + v.id + '/impact');
@@ -463,7 +470,7 @@ async function deleteVoice(v, b) {
     haptic('success');
     toast('Запись удалена');
     state.cache.clear();
-    reloadDay();
+    (done || reloadDay)();
   } catch (e) {
     b.disabled = false;
     alertBox(e.message);
@@ -480,7 +487,7 @@ function renderCard(card) {
   }
   root.append(el('p', 'hint', 'Нажмите на значение, чтобы открыть запись, из которой оно взято, и исправить её.'));
   for (const s of card.sections) {
-    const sec = el('section', 'sec', el('h3', null, s.title));
+    const sec = el('section', 'sec', sectionTitle(s));
     if (!s.mentioned) {
       sec.append(el('p', 'none', NOT_MENTIONED));
     } else if (s.group) {
@@ -492,9 +499,27 @@ function renderCard(card) {
   }
 }
 
+// linkSources — делать ли значения ссылками на записи-источники (в списке категории по дням записей рядом нет).
+let linkSources = true;
+
+// sectionTitle — заголовок раздела карточки; у одиночной категории ведёт к её списку по дням.
+function sectionTitle(s) {
+  const h = el('h3', null, s.title);
+  if (!s.group && s.items.length === 1) catLink(h, s.items[0].key, s.items[0].title);
+  return h;
+}
+
+function catLink(node, key, title) {
+  node.classList.add('cat-link');
+  node.title = 'Все значения категории по дням';
+  node.append(el('span', 'chev-link', ' ›'));
+  node.addEventListener('click', () => openCategoryDays(key, title));
+  return node;
+}
+
 // linked делает элемент карточки ссылкой на запись-источник.
 function linked(node, voice) {
-  if (!voice) return node;
+  if (!voice || !linkSources) return node;
   node.classList.add('src');
   node.dataset.voice = voice;
   node.addEventListener('click', () => focusVoice(voice));
@@ -537,12 +562,13 @@ function earlier(it) {
 function groupItem(it) {
   const values = it.values || [];
   const mentioned = values.length || (it.blocks && it.blocks.length);
-  if (!mentioned) return el('div', 'row', el('span', 'k', it.title + ': '), el('span', 'none', NOT_MENTIONED));
+  const k = () => catLink(el('span', 'k', it.title), it.key, it.title);
+  if (!mentioned) return el('div', 'row', k(), ': ', el('span', 'none', NOT_MENTIONED));
   if (it.kind === 'number' || it.kind === 'bool' || (it.kind === 'text' && values.length === 1)) {
-    return linked(el('div', 'row', el('span', 'k', it.title + ': '), values[0].text, mark(values[0]), earlier(it)), values[0].voice);
+    return linked(el('div', 'row', k(), ': ', values[0].text, mark(values[0]), earlier(it)), values[0].voice);
   }
   // список, дневник, несколько порций текста — блоком под названием
-  return el('div', 'row', el('span', 'k', it.title + ': '), ...itemBody(it));
+  return el('div', 'row', k(), ': ', ...itemBody(it));
 }
 
 // ---------- новая запись ----------
@@ -554,6 +580,8 @@ function openCompose(date) {
   input.max = state.today;
   input.value = d;
   $('compose-text').value = '';
+  resetRecorder();
+  $('compose-date').disabled = false;
   $('compose-form').hidden = false;
   $('compose-save').disabled = false;
   $('compose-result').hidden = true;
@@ -563,7 +591,7 @@ function openCompose(date) {
   $('compose-text').focus();
 }
 
-function composeDirty() { return !$('compose-form').hidden && $('compose-text').value.trim() !== ''; }
+function composeDirty() { return !$('compose-form').hidden && ($('compose-text').value.trim() !== '' || recorderBusy()); }
 
 function updateComposeCount() {
   const n = $('compose-text').value.length;
@@ -586,12 +614,17 @@ async function submitCompose(e) {
   save.disabled = true;
   let created;
   try {
-    created = await api('/api/entries', { method: 'POST', body: { date, text } });
+    // запись голосом уже сохранена на сервере: отправляем проверенный текст, а не создаём новую
+    const voice = recordedVoice();
+    created = voice
+      ? await api('/api/entries/' + voice + '/save', { method: 'POST', body: { text } })
+      : await api('/api/entries', { method: 'POST', body: { date, text } });
   } catch (err) {
     save.disabled = false;
     return alertBox(err.message);
   }
   setClosingConfirmation(false);
+  forgetRecording();
   state.cache.clear();
   $('compose-form').hidden = true;
   const result = $('compose-result');
@@ -657,6 +690,12 @@ function init() {
   $('day-add').addEventListener('click', () => openCompose(state.day));
   $('compose-text').addEventListener('input', updateComposeCount);
   $('compose-form').addEventListener('submit', submitCompose);
+  $('open-cats').addEventListener('click', () => openCategories(true));
+  for (const b of document.querySelectorAll('[data-back]')) b.addEventListener('click', goBack);
+  $('day-rebuild').addEventListener('click', () => runRebuild('day', state.day, $('day-rebuild-box'), $('day-rebuild'),
+    () => { if (!$('day').hidden) return reloadDay(); }));
+  initCategories();
+  initRecorder();
 
   if (!initData) {
     $('calendar').hidden = true;
@@ -666,4 +705,4 @@ function init() {
   openMonth('');
 }
 
-init();
+document.addEventListener('DOMContentLoaded', init);

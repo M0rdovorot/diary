@@ -7,6 +7,8 @@
 <link rel="stylesheet" href="style.css">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="app.js" defer></script>
+<script src="categories.js" defer></script>
+<script src="recorder.js" defer></script>
 </head>
 <body>
 <main id="app">
@@ -15,6 +17,9 @@
       <button id="prev" class="nav" aria-label="Предыдущий месяц">‹</button>
       <h1 id="month-title"></h1>
       <button id="next" class="nav" aria-label="Следующий месяц">›</button>
+      <button id="open-cats" class="icon-btn" aria-label="Категории" title="Категории">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>
+      </button>
       <button id="new-entry" class="pencil" aria-label="Новая запись" title="Новая запись">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
       </button>
@@ -29,7 +34,11 @@
     <header class="day-head">
       <button id="back" class="back">‹ Календарь</button>
       <h1 id="day-title"></h1>
-      <button id="day-add" class="btn">+ Добавить запись на этот день</button>
+      <div class="actions">
+        <button id="day-add" class="btn">+ Добавить запись на этот день</button>
+        <button id="day-rebuild" class="btn">↻ Пересобрать день</button>
+      </div>
+      <div id="day-rebuild-box" class="rebuild-box" hidden></div>
     </header>
     <div class="day-layout">
       <aside class="voices">
@@ -50,6 +59,19 @@
         <input id="compose-date" type="date" required>
       </label>
       <p class="hint">«Сегодня» и «вчера» в тексте считаются от этого дня. Можно рассказать и о других днях — запись разложится по ним.</p>
+      <div id="rec" class="rec" hidden>
+        <div class="rec-row">
+          <button id="rec-start" class="btn" type="button">🎙 Записать голосом</button>
+          <span id="rec-live" class="rec-live" hidden><span class="rec-dot"></span><span id="rec-time">0:00</span></span>
+          <button id="rec-stop" class="btn primary" type="button" hidden>■ Стоп</button>
+          <button id="rec-cancel" class="btn" type="button" hidden>Отмена</button>
+          <button id="rec-retry" class="btn primary" type="button" hidden>↻ Отправить ещё раз</button>
+        </div>
+        <div id="rec-progress" class="progress" hidden></div>
+        <p id="rec-error" class="note" hidden></p>
+        <audio id="rec-audio" controls hidden></audio>
+        <p id="rec-hint" class="hint" hidden>Текст ниже — расшифровка вашей записи. Прочитайте и исправьте ошибки, затем нажмите «Сохранить».</p>
+      </div>
       <textarea id="compose-text" rows="10" placeholder="Как прошёл день…" required></textarea>
       <div class="compose-foot">
         <span id="compose-count" class="hint"></span>
@@ -57,6 +79,67 @@
       </div>
     </form>
     <div id="compose-result" class="result" hidden></div>
+  </section>
+
+  <section id="categories" class="screen" hidden>
+    <header class="day-head">
+      <button class="back" data-back>‹ Назад</button>
+      <h1>Категории</h1>
+    </header>
+    <p class="hint">Категории — то, что бот выделяет из ваших записей. Изменения действуют на новые записи; чтобы увидеть их в прежних днях, пересоберите дни.</p>
+    <div class="actions">
+      <button id="cat-new" class="btn primary">+ Новая категория</button>
+      <button id="cat-rebuild" class="btn">↻ Пересобрать все дни</button>
+    </div>
+    <div id="cat-rebuild-box" class="rebuild-box" hidden></div>
+    <div id="cat-list" class="cat-list"></div>
+  </section>
+
+  <section id="catedit" class="screen" hidden>
+    <header class="day-head">
+      <button class="back" data-back>‹ Назад</button>
+      <h1 id="catedit-title">Категория</h1>
+    </header>
+    <form id="catedit-form" class="compose">
+      <label class="field">Название
+        <input id="ce-title" type="text" required>
+      </label>
+      <label class="field">Тип
+        <select id="ce-kind">
+          <option value="text">Текст — порции дополняют друг друга</option>
+          <option value="list">Список — значения объединяются</option>
+          <option value="number">Число — берётся самое свежее</option>
+          <option value="bool">Да/нет — берётся самое свежее</option>
+        </select>
+      </label>
+      <p id="ce-kind-note" class="hint" hidden>Тип нельзя изменить после создания: старые значения стали бы некорректными. Нужен другой тип — создайте новую категорию и скройте эту.</p>
+      <label id="ce-unit-wrap" class="field" hidden>Единица измерения
+        <input id="ce-unit" type="text">
+      </label>
+      <label class="field">Группа (необязательно)
+        <input id="ce-group" type="text" list="ce-groups">
+        <datalist id="ce-groups"></datalist>
+      </label>
+      <p class="hint">Категории одной группы показываются в карточке одним разделом.</p>
+      <label class="field">Подсказка для модели
+        <textarea id="ce-hint" rows="4"></textarea>
+      </label>
+      <p class="hint">Что именно записывать в эту категорию. Если нужно «только когда я сам сказал…» — так и напишите.</p>
+      <div class="compose-foot">
+        <span id="ce-count" class="hint"></span>
+        <button id="ce-save" class="btn primary" type="submit">Сохранить</button>
+      </div>
+    </form>
+    <div id="ce-actions" class="actions"></div>
+  </section>
+
+  <section id="catdays" class="screen" hidden>
+    <header class="day-head">
+      <button class="back" data-back>‹ Назад</button>
+      <h1 id="catdays-title"></h1>
+      <p id="catdays-sub" class="hint"></p>
+    </header>
+    <div id="catdays-list" class="catdays"></div>
   </section>
 
   <p id="status" class="status" hidden></p>

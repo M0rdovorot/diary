@@ -388,3 +388,29 @@ func TestSlugKey(t *testing.T) {
 		t.Errorf("слишком длинный ключ: %q", got)
 	}
 }
+
+func TestDefaultCategoriesFit(t *testing.T) {
+	seen := map[string]bool{}
+	for _, c := range DefaultCategories() {
+		if seen[c.Key] {
+			t.Errorf("ключ %q повторяется", c.Key)
+		}
+		seen[c.Key] = true
+		if n := len([]rune(c.Hint)); n > MaxHintRunes {
+			t.Errorf("%s: подсказка %d символов, максимум %d", c.Key, n, MaxHintRunes)
+		}
+		if n := len([]rune(c.Title)); n > MaxTitleRunes {
+			t.Errorf("%s: название %d символов", c.Key, n)
+		}
+	}
+	for key, kind := range map[string]Kind{"cinema": Text, "literature": Text, "key_thoughts": List} {
+		c, ok := DefaultSchema().Lookup(key)
+		if !ok || c.Kind != kind || !c.Active {
+			t.Errorf("категория %q: %+v", key, c)
+		}
+	}
+	// «Критические мысли» — только с прямой пометкой автора, как «Мысли для психолога»
+	if c, _ := DefaultSchema().Lookup("key_thoughts"); !strings.Contains(c.Hint, "явно пометил") {
+		t.Errorf("подсказка не требует пометки автора: %q", c.Hint)
+	}
+}

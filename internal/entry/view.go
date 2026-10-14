@@ -110,7 +110,10 @@ func sections(schema Schema) []section {
 
 // item сливает порции одной категории. Правила: текст — дополняется (все порции), списки —
 // объединяются, числа и да/нет — побеждает самое свежее, прежние отличавшиеся идут в Earlier.
-func (c Card) item(cat Category) ItemView {
+func (c Card) item(cat Category) ItemView { return c.Item(cat) }
+
+// Item — значение одной категории в этой карточке (с теми же правилами слияния, что в View).
+func (c Card) Item(cat Category) ItemView {
 	it := ItemView{Key: cat.Key, Title: cat.Title, Kind: KindName(cat.Kind)}
 	switch {
 	case cat.Key == DiaryKey:

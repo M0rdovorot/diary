@@ -183,3 +183,25 @@ func TestStatic(t *testing.T) {
 		}
 	}
 }
+
+// deadlineWriter запоминает, что до него дошли вызовы продления сроков.
+type deadlineWriter struct {
+	http.ResponseWriter
+	read, write bool
+}
+
+func (d *deadlineWriter) SetReadDeadline(time.Time) error  { d.read = true; return nil }
+func (d *deadlineWriter) SetWriteDeadline(time.Time) error { d.write = true; return nil }
+
+// Обёртка логирования не должна скрывать SetReadDeadline/SetWriteDeadline: иначе загрузка записи
+// голоса упирается в общий 30-секундный таймаут сервера.
+func TestStatusWriterPassesDeadlines(t *testing.T) {
+	inner := &deadlineWriter{ResponseWriter: httptest.NewRecorder()}
+	rc := http.NewResponseController(&statusWriter{ResponseWriter: inner})
+	if err := rc.SetReadDeadline(time.Now()); err != nil || !inner.read {
+		t.Errorf("SetReadDeadline: err=%v дошёл=%v", err, inner.read)
+	}
+	if err := rc.SetWriteDeadline(time.Now()); err != nil || !inner.write {
+		t.Errorf("SetWriteDeadline: err=%v дошёл=%v", err, inner.write)
+	}
+}

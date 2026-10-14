@@ -30,6 +30,13 @@ const initDataMaxAge = 24 * time.Hour
 // Store — данные, которые читает и меняет веб-интерфейс.
 type Store interface {
 	Schema(ctx context.Context) (entry.Schema, error)
+	CategoryUsage(ctx context.Context) (map[string]store.CategoryUse, error)
+	CategoryObservations(ctx context.Context, key string) ([]store.DatedObservation, error)
+	AddCategory(ctx context.Context, c entry.Category) (entry.Category, error)
+	UpdateCategory(ctx context.Context, key string, u store.CategoryUpdate) error
+	MoveCategory(ctx context.Context, key string, delta int) error
+	DeleteCategory(ctx context.Context, key string) (int, error)
+	RebuildPlanFor(ctx context.Context, day *time.Time) (store.RebuildPlan, error)
 	DayObservations(ctx context.Context, date time.Time) ([]entry.Observation, error)
 	DayVoices(ctx context.Context, date time.Time) ([]store.Voice, error)
 	MonthDays(ctx context.Context, from, to time.Time) ([]store.DaySummary, error)
@@ -60,9 +67,17 @@ type Server struct {
 	AllowedUserID int64
 	// Notify отправляет владельцу короткое сообщение в чат о действии в Mini App; nil — не отправлять.
 	Notify func(ctx context.Context, text string)
+	// Transcribe распознаёт OGG/Opus-файл (запись голоса из Mini App); nil — запись голоса выключена.
+	Transcribe func(ctx context.Context, path string) (string, error)
+	// Convert переводит присланную из браузера запись (webm, mp4…) в OGG/Opus для SpeechKit.
+	Convert func(ctx context.Context, in, out string) error
+	// DataDir — куда временно кладутся записи голоса.
+	DataDir string
 
 	now  func() time.Time // для тестов
 	jobs jobs
+	bulk bulkRebuild
+	recs recordings
 }
 
 // Handler — все маршруты: статика на «/», API на «/api/».
@@ -81,6 +96,18 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/entries/{id}/confirm", s.auth(s.confirmEntry))
 	mux.Handle("DELETE /api/entries/{id}", s.auth(s.deleteEntry))
 	mux.Handle("POST /api/segments/{id}/date", s.auth(s.resolveSegment))
+	mux.Handle("POST /api/entries/{id}/save", s.auth(s.saveRecording))
+	mux.Handle("GET /api/categories", s.auth(s.listCategories))
+	mux.Handle("POST /api/categories", s.auth(s.createCategory))
+	mux.Handle("PATCH /api/categories/{key}", s.auth(s.updateCategory))
+	mux.Handle("DELETE /api/categories/{key}", s.auth(s.deleteCategory))
+	mux.Handle("POST /api/categories/{key}/move", s.auth(s.moveCategory))
+	mux.Handle("GET /api/categories/{key}/days", s.auth(s.categoryDays))
+	mux.Handle("GET /api/rebuild/plan", s.auth(s.rebuildPlan))
+	mux.Handle("GET /api/rebuild", s.auth(s.rebuildStatus))
+	mux.Handle("POST /api/rebuild", s.auth(s.rebuildStart))
+	mux.Handle("POST /api/recordings", s.auth(s.uploadRecording))
+	mux.Handle("GET /api/recordings/{id}", s.auth(s.recordingStatus))
 	return s.logged(secure(mux))
 }
 
@@ -113,7 +140,7 @@ func secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://telegram.org; "+
-			"style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; "+
+			"style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; media-src blob:; base-uri 'none'; form-action 'none'; "+
 			"frame-ancestors https://web.telegram.org")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
@@ -131,6 +158,10 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap нужен http.ResponseController: без него SetReadDeadline/SetWriteDeadline через обёртку
+// не работают (ErrNotSupported), и общие таймауты сервера действуют на долгих загрузках.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // logged пишет в лог метод, путь, статус и время — без параметров и содержимого.
 func (s *Server) logged(next http.Handler) http.Handler {
@@ -177,6 +208,7 @@ type monthResponse struct {
 	Pending     []pendingPart `json:"pending"`     // части записей без даты (во всей базе)
 	Unanalyzed  []entryBrief  `json:"unanalyzed"`  // записи без разбора (во всей базе)
 	Unconfirmed int           `json:"unconfirmed"` // неподтверждённых расшифровок (во всей базе)
+	CanRecord   bool          `json:"canRecord"`   // запись голоса в приложении настроена
 }
 
 // pendingPart — часть записи, для которой модель не определила день.
@@ -239,6 +271,7 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 	resp := monthResponse{
 		Month: first.Format("2006-01"), Today: today.Format("2006-01-02"), MinDate: s.minDate(today).Format("2006-01-02"),
 		Days: []monthDay{}, Pending: pending, Unanalyzed: []entryBrief{}, Unconfirmed: unconfirmed,
+		CanRecord: s.Transcribe != nil && s.Convert != nil,
 	}
 	for _, v := range unanalyzed {
 		if s.jobs.running(v.ID) {

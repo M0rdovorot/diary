@@ -396,6 +396,11 @@ func splitMessage(text string, limit int) []string {
 	return parts
 }
 
+// Transcribe — распознавание OGG/Opus-файла для Mini App (запись голоса в приложении).
+func (h *Handler) Transcribe(ctx context.Context, path string) (string, error) {
+	return h.transcribe(ctx, path)
+}
+
 // transcribe загружает файл в Object Storage, распознаёт через SpeechKit и чистит бакет.
 func (h *Handler) transcribe(ctx context.Context, path string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, recognizeTimeout)

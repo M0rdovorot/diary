@@ -11,6 +11,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"diary/internal/audio"
 	"diary/internal/cleanup"
 	"diary/internal/config"
 	"diary/internal/diaryday"
@@ -108,12 +109,18 @@ func main() {
 	if cfg.WebAppURL != "" {
 		web := &webapp.Server{
 			Log: log, Store: db, Analyzer: h, Clock: clock, BotToken: cfg.TelegramToken, AllowedUserID: cfg.AllowedUserID,
+			DataDir: cfg.DataDir,
 			// действия в Mini App коротко дублируются в чат с владельцем (личный чат: chat_id = user_id)
 			Notify: func(ctx context.Context, text string) {
 				if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: cfg.AllowedUserID, Text: text}); err != nil {
 					log.Warn("webapp notify", "err", err)
 				}
 			},
+		}
+		if audio.Available() {
+			web.Transcribe, web.Convert = h.Transcribe, audio.ToOggOpus
+		} else {
+			log.Warn("ffmpeg не найден: запись голоса в Mini App выключена")
 		}
 		go func() {
 			if err := web.Run(ctx, cfg.WebAppAddr); err != nil {

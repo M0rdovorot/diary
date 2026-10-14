@@ -22,7 +22,7 @@ func Sweep(dir string, maxAge time.Duration, now time.Time) (int, error) {
 	}
 	removed := 0
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".ogg") {
+		if !e.Type().IsRegular() || !(strings.HasSuffix(e.Name(), ".ogg") || strings.HasSuffix(e.Name(), ".src")) {
 			continue
 		}
 		info, err := e.Info()

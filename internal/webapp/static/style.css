@@ -123,3 +123,40 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: v
 
 .status { text-align: center; color: var(--hint); margin-top: 40px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 10px; font-size: 14px; max-width: calc(100% - 32px); z-index: 10; }
+
+/* категории */
+.icon-btn { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--bg2); color: var(--link); margin-left: 6px; }
+.cat-list { max-width: 720px; margin-top: 8px; }
+.cat-row { display: flex; align-items: center; gap: 6px; background: var(--bg2); border-radius: var(--radius); padding: 6px 6px 6px 12px; margin-bottom: 8px; }
+.cat-row.hidden-cat { opacity: .75; }
+.cat-main { flex: 1; min-width: 0; text-align: left; display: flex; flex-direction: column; padding: 4px 0; }
+.cat-title { font-weight: 600; overflow-wrap: anywhere; }
+.cat-tools { display: flex; gap: 2px; }
+.cat-tools .btn { padding: 8px 12px; min-width: 40px; justify-content: center; background: var(--bg); }
+.rebuild-box { max-width: 720px; margin-top: 8px; }
+#catedit-form select, #catedit-form input, #catedit-form textarea { width: 100%; }
+#catedit-form .field { align-self: stretch; }
+#ce-actions { max-width: 720px; margin-top: 14px; }
+
+/* значения категории по дням */
+.catdays { max-width: 720px; }
+.catday { background: var(--bg2); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px; }
+.catday p, .catday ul { margin: 0 0 4px; }
+.catday ul { padding-left: 20px; }
+.catday .none { color: var(--hint); }
+.catday .pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.catday-head { width: 100%; display: flex; align-items: baseline; gap: 4px; text-align: left; font-size: 13px; color: var(--hint); margin-bottom: 4px; }
+.catday-head .chev { margin-left: auto; }
+.cat-link { cursor: pointer; }
+.chev-link { color: var(--hint); font-weight: 400; }
+
+/* запись голоса */
+.rec { background: var(--bg2); border-radius: var(--radius); padding: 10px 12px; }
+.rec-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.rec .btn { background: var(--bg); }
+.rec .btn.primary { background: var(--accent); }
+.rec-live { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: blink 1s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+.rec audio { width: 100%; margin-top: 8px; }
+.rec .note { background: var(--bg); margin: 8px 0 0; }

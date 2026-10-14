@@ -46,15 +46,15 @@ type jobs struct {
 	m  map[int64]*job
 }
 
-// start запускает fn в фоне для записи id; false — по этой записи разбор уже идёт.
-func (j *jobs) start(id int64, fn func(ctx context.Context) error) bool {
+// begin отмечает запись как разбираемую; false — по ней разбор уже идёт.
+func (j *jobs) begin(id int64) (*job, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.m == nil {
 		j.m = map[int64]*job{}
 	}
 	if cur, ok := j.m[id]; ok && cur.state == stateRunning {
-		return false
+		return nil, false
 	}
 	for k, v := range j.m { // завершённые давно никому не нужны
 		if v.state != stateRunning && time.Since(v.finished) > time.Hour {
@@ -63,18 +63,43 @@ func (j *jobs) start(id int64, fn func(ctx context.Context) error) bool {
 	}
 	jb := &job{state: stateRunning}
 	j.m[id] = jb
+	return jb, true
+}
+
+func (j *jobs) finish(jb *job, err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	jb.state, jb.finished = stateDone, time.Now()
+	if err != nil {
+		jb.state, jb.err = stateFailed, err.Error()
+	}
+}
+
+// start запускает fn в фоне для записи id; false — по этой записи разбор уже идёт.
+func (j *jobs) start(id int64, fn func(ctx context.Context) error) bool {
+	jb, ok := j.begin(id)
+	if !ok {
+		return false
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), analyzeTimeout)
 		defer cancel()
-		err := fn(ctx)
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		jb.state, jb.finished = stateDone, time.Now()
-		if err != nil {
-			jb.state, jb.err = stateFailed, err.Error()
-		}
+		j.finish(jb, fn(ctx))
 	}()
 	return true
+}
+
+// run выполняет fn для записи id в текущей горутине; false — по этой записи разбор уже идёт.
+func (j *jobs) run(ctx context.Context, id int64, fn func(ctx context.Context) error) (ran bool, err error) {
+	jb, ok := j.begin(id)
+	if !ok {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, analyzeTimeout)
+	defer cancel()
+	err = fn(ctx)
+	j.finish(jb, err)
+	return true, err
 }
 
 func (j *jobs) get(id int64) (state, errText string) {

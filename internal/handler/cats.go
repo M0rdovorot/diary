@@ -18,10 +18,10 @@ import (
 const catCallbackPrefix = "c:"
 
 const (
-	maxTitleRunes = 40
-	maxHintRunes  = 300
-	maxUnitRunes  = 12
-	maxGroupRunes = 30
+	maxTitleRunes = entry.MaxTitleRunes
+	maxHintRunes  = entry.MaxHintRunes
+	maxUnitRunes  = entry.MaxUnitRunes
+	maxGroupRunes = entry.MaxGroupRunes
 )
 
 // catDraft — новая категория, собираемая мастером добавления.
@@ -510,17 +510,7 @@ func (h *Handler) askGroup(ctx context.Context, b *bot.Bot, chatID int64, d *cat
 // validateTitle проверяет название категории. Возвращает очищенное название или текст ошибки.
 // exceptKey — ключ редактируемой категории (её собственное название дублем не считается).
 func validateTitle(schema entry.Schema, title, exceptKey string) (string, string) {
-	title = strings.Join(strings.Fields(title), " ")
-	switch n := len([]rune(title)); {
-	case n == 0:
-		return "", "Название не может быть пустым."
-	case n > maxTitleRunes:
-		return "", fmt.Sprintf("Слишком длинно (%d символов, максимум %d). Сократите, пожалуйста.", n, maxTitleRunes)
-	}
-	if c, ok := schema.FindByTitle(title); ok && c.Key != exceptKey {
-		return "", "Категория с таким названием уже есть. Придумайте другое название."
-	}
-	return title, ""
+	return entry.CleanTitle(schema, title, exceptKey)
 }
 
 // finishCategory создаёт категорию из черновика мастера.
