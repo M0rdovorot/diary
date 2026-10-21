@@ -945,3 +945,66 @@ func TestDeleteEntryFlow(t *testing.T) {
 		t.Fatalf("осталось: %+v", left)
 	}
 }
+
+// replyIDs — для каждого отправленного сообщения: id сообщения, на которое оно отвечает (0 — не ответ).
+func (f *fakeTelegram) replyIDs() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []int
+	for _, c := range f.calls {
+		if c.method != "sendMessage" {
+			continue
+		}
+		id := 0
+		if raw, ok := c.body["reply_parameters"].(string); ok {
+			var rp struct {
+				MessageID int  `json:"message_id"`
+				Allow     bool `json:"allow_sending_without_reply"`
+			}
+			if json.Unmarshal([]byte(raw), &rp) == nil && rp.Allow {
+				id = rp.MessageID
+			}
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// Ответы бота по записи привязаны к исходному сообщению: при нескольких одновременных записях
+// видно, к какой относится каждый ответ. Команды отвечают обычными сообщениями.
+func TestRepliesLinkedToEntry(t *testing.T) {
+	e := newEnv(t)
+	e.setGPT(func(string) string {
+		return `{"segments":[{"date":null,"date_source":"unknown","diary":"Что-то без даты."}]}`
+	})
+	sent := time.Date(2026, 9, 5, 10, 0, 0, 0, e.zone)
+
+	e.voice(77, sent, "первая запись")
+	// сегмент без даты → ответ по записи, вопрос о дне и просьба подтвердить расшифровку
+	ids := e.tg.replyIDs()
+	if len(ids) < 3 {
+		t.Fatalf("мало сообщений: %v", ids)
+	}
+	for i, id := range ids {
+		if id != 77 {
+			t.Errorf("сообщение %d не отвечает на запись 77: %v", i, ids)
+		}
+	}
+
+	before := len(ids)
+	e.text(78, sent.Add(time.Minute), "вторая запись")
+	for i, id := range e.tg.replyIDs()[before:] {
+		if id != 78 {
+			t.Errorf("текстовая запись, сообщение %d: ответ на %d, ожидалось 78", i, id)
+		}
+	}
+
+	before = len(e.tg.replyIDs())
+	e.say("/day 05.09")
+	e.say("/date сброс")
+	for _, id := range e.tg.replyIDs()[before:] {
+		if id != 0 {
+			t.Errorf("команда ответила на чужое сообщение: %d", id)
+		}
+	}
+}

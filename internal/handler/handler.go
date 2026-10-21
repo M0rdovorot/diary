@@ -109,6 +109,7 @@ func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
 		return
 	}
 
+	ctx = withReply(ctx, m.ID) // все ответы по этому голосовому — ответом на него
 	sent := time.Unix(int64(m.Date), 0)
 	// день записи фиксируем в момент получения: выбранный /date или день отправки
 	ref := h.referenceDate(ctx, h.Clock.LogicalDate(sent))
@@ -116,7 +117,7 @@ func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
 	path, err := h.download(ctx, b, m.Voice.FileID, m.ID)
 	if err != nil {
 		h.Log.Error("download voice", "err", err)
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: "Не удалось скачать голосовое"})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: "Не удалось скачать голосовое", ReplyParameters: replyParams(ctx)})
 		return
 	}
 	h.Log.Info("voice downloaded", "path", path, "duration_s", m.Voice.Duration)
@@ -125,13 +126,13 @@ func (h *Handler) onVoice(ctx context.Context, b *bot.Bot, u *models.Update) {
 	if !ref.Equal(h.Clock.LogicalDate(sent)) {
 		ack += "\nДень записи: " + ref.Format("02.01.2006") + " (выбран командой /date, сбросить: /date сброс)"
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: ack})
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: ack, ReplyParameters: replyParams(ctx)})
 
 	text, err := h.transcribe(ctx, path)
 	if err != nil {
 		// файл остаётся на диске: его подметёт cleanup по сроку хранения
 		h.Log.Error("transcribe", "err", err)
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: "Не удалось распознать голосовое"})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: "Не удалось распознать голосовое", ReplyParameters: replyParams(ctx)})
 		return
 	}
 	// аудио больше не нужно: текст получен, а в Telegram оригинал остаётся
@@ -169,6 +170,7 @@ func (h *Handler) referenceDate(ctx context.Context, fallback time.Time) time.Ti
 // просит подтвердить расшифровку) или "text" (записано текстом, считается подтверждённым).
 // ref — день, к которому отнесена запись (от него считаются «сегодня»/«вчера»).
 func (h *Handler) processTranscript(ctx context.Context, b *bot.Bot, chatID int64, msgID int, sent, ref time.Time, durationSec int, text, source string) {
+	ctx = withReply(ctx, msgID)
 	logical := h.Clock.LogicalDate(sent)
 
 	// сначала сохраняем текст: что бы ни случилось дальше, запись не потеряется
@@ -205,6 +207,7 @@ func (h *Handler) isTextEntry(u *models.Update) bool {
 // onText обрабатывает текстовую запись так же, как голосовую, но без распознавания и подтверждения.
 func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 	m := u.Message
+	ctx = withReply(ctx, m.ID)
 	sent := time.Unix(int64(m.Date), 0)
 	ref := h.referenceDate(ctx, h.Clock.LogicalDate(sent))
 
@@ -212,7 +215,7 @@ func (h *Handler) onText(ctx context.Context, b *bot.Bot, u *models.Update) {
 	if !ref.Equal(h.Clock.LogicalDate(sent)) {
 		ack += "\nДень записи: " + ref.Format("02.01.2006") + " (выбран командой /date, сбросить: /date сброс)"
 	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: ack})
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: m.Chat.ID, Text: ack, ReplyParameters: replyParams(ctx)})
 
 	h.processTranscript(ctx, b, m.Chat.ID, m.ID, sent, ref, 0, strings.TrimSpace(m.Text), "text")
 }
@@ -228,14 +231,14 @@ func (h *Handler) askConfirm(ctx context.Context, b *bot.Bot, chatID, voiceID in
 
 	msg := "Расшифровка:\n" + text + "\n\nВсё верно?"
 	if len([]rune(msg)) <= 4000 {
-		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: msg, ReplyMarkup: markup}); err != nil {
+		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: msg, ReplyMarkup: markup, ReplyParameters: replyParams(ctx)}); err != nil {
 			h.Log.Error("ask confirm", "err", err)
 		}
 		return
 	}
 	// длинный текст не помещается в одно сообщение: текст отдельно, вопрос с кнопками отдельно
 	h.send(ctx, b, chatID, "Расшифровка:\n"+text)
-	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Расшифровка верна?", ReplyMarkup: markup}); err != nil {
+	if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Расшифровка верна?", ReplyMarkup: markup, ReplyParameters: replyParams(ctx)}); err != nil {
 		h.Log.Error("ask confirm", "err", err)
 	}
 }
@@ -352,8 +355,9 @@ func (h *Handler) Analyze(ctx context.Context, voiceID int64, ref, today time.Ti
 // offerRedo предлагает повторить разбор сохранённой расшифровки (например, после сбоя модели).
 func (h *Handler) offerRedo(ctx context.Context, b *bot.Bot, chatID, voiceID int64) {
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID,
-		Text:   "Повторить разбор записи?",
+		ChatID:          chatID,
+		Text:            "Повторить разбор записи?",
+		ReplyParameters: replyParams(ctx),
 		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
 			{Text: "Повторить разбор", CallbackData: fmt.Sprintf("%s%d", editRedoPrefix, voiceID)},
 		}}},
@@ -366,7 +370,7 @@ func (h *Handler) offerRedo(ctx context.Context, b *bot.Bot, chatID, voiceID int
 // send отправляет текст, разбивая его на части под лимит Telegram (4096 символов).
 func (h *Handler) send(ctx context.Context, b *bot.Bot, chatID int64, text string) {
 	for _, part := range splitMessage(text, 4000) {
-		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: part}); err != nil {
+		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: part, ReplyParameters: replyParams(ctx)}); err != nil {
 			h.Log.Error("send message", "err", err)
 			return
 		}
@@ -461,4 +465,25 @@ func (h *Handler) download(ctx context.Context, b *bot.Bot, fileID string, msgID
 		return "", err
 	}
 	return path, nil
+}
+
+type replyKey struct{}
+
+// withReply помечает контекст: сообщения бота, отправленные с ним, идут ответом на сообщение msgID.
+// Так при нескольких одновременных записях видно, к какой относится каждый ответ.
+func withReply(ctx context.Context, msgID int) context.Context {
+	if msgID == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, replyKey{}, msgID)
+}
+
+// replyParams — параметры ответа для сообщения, отправляемого в этом контексте (nil — обычное сообщение).
+// Если исходное сообщение удалено, Telegram всё равно отправит ответ.
+func replyParams(ctx context.Context) *models.ReplyParameters {
+	id, ok := ctx.Value(replyKey{}).(int)
+	if !ok {
+		return nil
+	}
+	return &models.ReplyParameters{MessageID: id, AllowSendingWithoutReply: true}
 }

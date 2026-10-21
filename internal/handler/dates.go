@@ -38,8 +38,9 @@ func (h *Handler) askDate(ctx context.Context, b *bot.Bot, chatID, segID int64, 
 		text += "\n\n«" + preview + "»"
 	}
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID,
-		Text:   text,
+		ChatID:          chatID,
+		Text:            text,
+		ReplyParameters: replyParams(ctx),
 		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
 			{Text: "Сегодня (" + today.Format("02.01") + ")", CallbackData: data(today)},
 			{Text: "Вчера (" + yesterday.Format("02.01") + ")", CallbackData: data(yesterday)},
