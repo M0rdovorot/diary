@@ -98,7 +98,7 @@ func (f *fakeTelegram) beforeLast() string {
 	return t[len(t)-2]
 }
 
-type button struct{ text, data string }
+type button struct{ text, data, style string }
 
 // lastButtons — кнопки последней клавиатуры, построчно.
 func (f *fakeTelegram) lastButtons() [][]button {
@@ -114,7 +114,8 @@ func (f *fakeTelegram) lastButtons() [][]button {
 			var r []button
 			for _, b := range row.([]any) {
 				m := b.(map[string]any)
-				r = append(r, button{m["text"].(string), m["callback_data"].(string)})
+				style, _ := m["style"].(string)
+				r = append(r, button{m["text"].(string), m["callback_data"].(string), style})
 			}
 			rows = append(rows, r)
 		}
@@ -288,6 +289,8 @@ func (e *env) press(data string) {
 	switch {
 	case strings.HasPrefix(data, dateCallbackPrefix):
 		e.h.onDateCallback(e.ctx, e.b, upd)
+	case strings.HasPrefix(data, pickCallbackPrefix):
+		e.h.onPickCallback(e.ctx, e.b, upd)
 	case strings.HasPrefix(data, catCallbackPrefix):
 		e.h.onCategoryCallback(e.ctx, e.b, upd)
 	default:

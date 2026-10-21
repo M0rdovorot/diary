@@ -280,15 +280,10 @@ func (h *Handler) onDate(ctx context.Context, b *bot.Bot, u *models.Update) {
 
 	switch arg {
 	case "":
-		if cur.IsZero() {
-			h.send(ctx, b, m.Chat.ID, "Рабочий день не выбран: «сегодня» и «вчера» считаются от даты отправки голосового (сейчас в дневнике "+
-				now.Format("02.01.2006")+").\nВыбрать день: /date 01.09")
-		} else {
-			h.send(ctx, b, m.Chat.ID, "Рабочий день: "+cur.Format("02.01.2006")+". Все новые голосовые считаются записанными в этот день, «сегодня» и «вчера» — относительно него.\nСбросить: /date сброс")
-		}
+		h.askWorkingDay(ctx, b, m.Chat.ID, now, cur)
 		return
 	case "сброс", "сбросить", "reset", "off", "нет":
-		h.resetReferenceDate(ctx, b, m.Chat.ID, now)
+		h.send(ctx, b, m.Chat.ID, h.clearWorkingDay(ctx, now))
 		return
 	}
 
@@ -297,24 +292,27 @@ func (h *Handler) onDate(ctx context.Context, b *bot.Bot, u *models.Update) {
 		h.send(ctx, b, m.Chat.ID, err.Error()+". Пример: /date 01.09 или /date сброс")
 		return
 	}
+	h.send(ctx, b, m.Chat.ID, h.setWorkingDay(ctx, d, now))
+}
+
+// setWorkingDay сохраняет рабочий день и возвращает ответ пользователю. Выбор сегодняшнего дня —
+// то же, что сброс (иначе настройка «залипала» бы на завтра).
+func (h *Handler) setWorkingDay(ctx context.Context, d, now time.Time) string {
 	if d.Equal(now) {
-		// выбрать сегодняшний день — то же, что сброс, но без «залипания» на завтра
-		h.resetReferenceDate(ctx, b, m.Chat.ID, now)
-		return
+		return h.clearWorkingDay(ctx, now)
 	}
 	if err := h.Store.SetSetting(ctx, referenceDateKey, d.Format("2006-01-02")); err != nil {
 		h.Log.Error("set reference date", "err", err)
-		h.send(ctx, b, m.Chat.ID, "Не удалось сохранить настройку.")
-		return
+		return "Не удалось сохранить настройку."
 	}
-	h.send(ctx, b, m.Chat.ID, "Рабочий день: "+d.Format("02.01.2006")+". Новые голосовые считаются записанными в этот день; «сегодня» и «вчера» в них — относительно него.\nСбросить: /date сброс")
+	return "Рабочий день: " + d.Format("02.01.2006") + ". Новые голосовые считаются записанными в этот день; «сегодня» и «вчера» в них — относительно него.\nСбросить: /date сброс"
 }
 
-func (h *Handler) resetReferenceDate(ctx context.Context, b *bot.Bot, chatID int64, now time.Time) {
+// clearWorkingDay сбрасывает рабочий день и возвращает ответ пользователю.
+func (h *Handler) clearWorkingDay(ctx context.Context, now time.Time) string {
 	if err := h.Store.DeleteSetting(ctx, referenceDateKey); err != nil {
 		h.Log.Error("reset reference date", "err", err)
-		h.send(ctx, b, chatID, "Не удалось сбросить настройку.")
-		return
+		return "Не удалось сбросить настройку."
 	}
-	h.send(ctx, b, chatID, "Рабочий день сброшен: «сегодня» и «вчера» снова считаются от даты отправки голосового (сейчас в дневнике "+now.Format("02.01.2006")+").")
+	return "Рабочий день сброшен: «сегодня» и «вчера» снова считаются от даты отправки голосового (сейчас в дневнике " + now.Format("02.01.2006") + ")."
 }

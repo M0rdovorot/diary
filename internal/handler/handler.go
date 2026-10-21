@@ -94,6 +94,7 @@ func (h *Handler) Register(b *bot.Bot) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "categories", bot.MatchTypeCommandStartOnly, h.onCategories)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "calendar", bot.MatchTypeCommandStartOnly, h.onCalendar)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, dateCallbackPrefix, bot.MatchTypePrefix, h.onDateCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, pickCallbackPrefix, bot.MatchTypePrefix, h.onPickCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, editCallbackPrefix, bot.MatchTypePrefix, h.onEditCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, catCallbackPrefix, bot.MatchTypePrefix, h.onCategoryCallback)
 	// ответ на вопрос бота (дата, правка, настройка) важнее, чем новая текстовая запись
